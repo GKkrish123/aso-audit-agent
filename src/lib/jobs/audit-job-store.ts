@@ -124,14 +124,21 @@ function getStepOutput(
   return out && typeof out === "object" ? (out as Record<string, unknown>) : undefined;
 }
 
-function isAwaitingConfirmation(snapshot: SnapshotShape): boolean {
+function hasPassedConfirmationGate(snapshot: SnapshotShape): boolean {
   const confirmStep = snapshot.steps?.["await-confirmation"];
-  if (confirmStep?.status === "success") return false;
+  if (confirmStep?.status === "success") return true;
+  const auditStep = snapshot.steps?.["run-audit"];
+  return auditStep?.status === "running" || auditStep?.status === "success";
+}
+
+function isAwaitingConfirmation(snapshot: SnapshotShape): boolean {
+  if (hasPassedConfirmationGate(snapshot)) return false;
+  const fetchStep = snapshot.steps?.["fetch-metadata"];
+  if (fetchStep?.status !== "success") return false;
+  const confirmStep = snapshot.steps?.["await-confirmation"];
   if (confirmStep?.status === "suspended") return true;
-  if (snapshot.status === "suspended") {
-    return Boolean(snapshot.suspendedPaths && "await-confirmation" in snapshot.suspendedPaths);
-  }
-  return false;
+  if (snapshot.status === "suspended") return true;
+  return confirmStep?.status !== "success";
 }
 
 function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
@@ -139,17 +146,21 @@ function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
   if (raw === "success") return "completed";
   if (raw === "failed") return "failed";
   if (raw === "cancelled" || raw === "canceled") return "cancelled";
+
+  const auditStep = snapshot.steps?.["run-audit"];
+  if (auditStep?.status === "running" || auditStep?.status === "success") {
+    return "running_audit";
+  }
+
   if (isAwaitingConfirmation(snapshot)) return "awaiting_confirmation";
-  if (raw === "suspended") return "running_audit";
-  if (raw === "running" || raw === "waiting") {
-    const auditStep = snapshot.steps?.["run-audit"];
-    if (auditStep?.status === "running" || auditStep?.status === "success") {
-      return "running_audit";
-    }
+  if (hasPassedConfirmationGate(snapshot)) return "running_audit";
+
+  if (raw === "running" || raw === "waiting" || raw === "suspended") {
     const fetchStep = snapshot.steps?.["fetch-metadata"];
-    if (fetchStep?.status === "success") return "running_audit";
+    if (fetchStep?.status === "success") return "awaiting_confirmation";
     return "fetching_metadata";
   }
+
   return "queued";
 }
 
@@ -543,16 +554,25 @@ async function waitForConfirmationGate(jobId: string): Promise<AuditJob> {
     const job = await getAuditJob(jobId);
     if (job.status === "awaiting_confirmation") return job;
     if (job.status === "failed" || job.status === "cancelled") return job;
-    if (job.status === "running_audit" || job.status === "completed") {
+    if (job.status === "completed") {
       getLogger().error(
         { jobId, status: job.status },
-        "workflow passed confirmation gate before user confirmed",
+        "workflow completed before user confirmed",
       );
       return job;
     }
+    // Do not return on running_audit — that was a mis-inference while fetch
+    // finished but the workflow was still reaching the suspend gate.
     await new Promise((r) => setTimeout(r, 200));
   }
-  return await getAuditJob(jobId);
+  const job = await getAuditJob(jobId);
+  if (job.status === "running_audit") {
+    getLogger().error(
+      { jobId, status: job.status },
+      "confirmation gate timed out while status was running_audit",
+    );
+  }
+  return job;
 }
 
 export async function getAuditJob(jobId: string): Promise<AuditJob> {
