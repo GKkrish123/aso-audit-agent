@@ -32,6 +32,15 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# mastra local snapshots
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+mastra.db
+.mastra/
 
 # vercel
 .vercel

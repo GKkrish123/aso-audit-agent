@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "src/app/api/audit/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/audit/[jobId]/confirm/route.ts": {
+      "maxDuration": 120
+    },
+    "src/app/api/audit/[jobId]/route.ts": {
+      "maxDuration": 10
+    }
+  }
+}
