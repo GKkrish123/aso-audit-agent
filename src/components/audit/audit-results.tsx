@@ -114,9 +114,9 @@ function RecommendationsList({
   }
   return (
       <ul className="space-y-3">
-      {filtered.map((r) => (
+      {filtered.map((r, index) => (
         <li
-          key={r.id}
+          key={`${severity}-${r.id}-${index}`}
           className="rounded-lg border bg-muted/30 p-3 text-sm leading-relaxed"
         >
           <div className="flex flex-wrap items-center gap-2">

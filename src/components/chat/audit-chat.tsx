@@ -347,7 +347,7 @@ export function AuditChat() {
         }
       } catch {
       }
-    }, 1500);
+    }, 3000); // for now I'm keeping this at 3 seconds to avoid overwhelming the server
     return () => window.clearInterval(interval);
   }, [activeJobId, activeJobStatus, applyJobTransition, refreshChats]);
 

@@ -24,9 +24,11 @@ const ITUNES_RSS = (
   `https://itunes.apple.com/${encodeURIComponent(country)}/rss/${kind === "topfree" ? "topfreeapplications" : "topgrossingapplications"}/limit=${limit}${genreId ? `/genre=${encodeURIComponent(genreId)}` : ""}/json`;
 
 const MIN_RATING_COUNT = 50;
+/** Drop chart/search hits with almost no lexical overlap to the target listing. */
+const MIN_RELEVANCE_SCORE = 0.06;
 const SEARCH_LIMIT = 50;
 const TOP_CHART_LIMIT = 50;
-const MAX_TERM_QUERIES = 4;
+const MAX_SEARCH_TERMS = 8;
 const SEARCH_CONCURRENCY = 5;
 
 // Fallback when iTunes Lookup didn't return primaryGenreId (legacy records).
@@ -265,33 +267,101 @@ function popularityScore(
   );
 }
 
-function buildQueryTokens(
+/** Tokens describing what the app does — used for relevance, not iTunes query strings. */
+export function buildTargetRelevanceTokens(
   metadata: AppMetadata,
   listing?: ListingContent,
+): Set<string> {
+  const tokens = new Set<string>();
+  const add = (s: string | undefined | null): void => {
+    for (const t of tokenize(s ?? "")) tokens.add(t);
+  };
+  add(metadata.trackName);
+  add(metadata.artistName);
+  if (listing) {
+    add(listing.subtitle);
+    add(listing.promotionalText);
+    add((listing.description ?? "").slice(0, 1200));
+  }
+  add(metadata.itunesDescription?.slice(0, 1200));
+  return tokens;
+}
+
+function candidateRelevanceTokens(candidate: SearchResult): Set<string> {
+  const tokens = new Set<string>();
+  const add = (s: string | undefined | null): void => {
+    for (const t of tokenize(s ?? "")) tokens.add(t);
+  };
+  add(candidate.trackName);
+  add(candidate.artistName);
+  add(candidate.description?.slice(0, 1200));
+  return tokens;
+}
+
+export function relevanceScore(
+  targetTokens: Set<string>,
+  candidate: SearchResult,
+): number {
+  if (targetTokens.size === 0) return 0;
+  return jaccard(targetTokens, candidateRelevanceTokens(candidate));
+}
+
+/**
+ * iTunes search terms from the listing: short phrases first, then distinctive tokens.
+ * No category-specific hardcoding — works for music, games, productivity, etc.
+ */
+export function buildSearchTerms(
+  metadata: AppMetadata,
+  listing?: ListingContent,
+  maxTerms = MAX_SEARCH_TERMS,
 ): string[] {
   const developerTokens = tokenize(metadata.artistName);
-  const genreTokens = tokenize(metadata.primaryGenreName ?? "");
-  const drop = new Set<string>([...developerTokens, ...genreTokens]);
+  const genreTokens = new Set<string>([
+    ...tokenize(metadata.primaryGenreName ?? ""),
+    ...(metadata.genres ?? []).flatMap((g) => [...tokenize(g)]),
+  ]);
+  const drop = new Set([...developerTokens, ...genreTokens]);
 
-  const ordered: string[] = [];
+  const terms: string[] = [];
   const seen = new Set<string>();
-  const push = (s: string | undefined | null): void => {
+
+  const addPhrase = (raw: string | undefined | null): void => {
+    const phrase = raw?.trim();
+    if (!phrase || phrase.length < 3) return;
+    const key = phrase.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    terms.push(phrase);
+  };
+
+  const addTokens = (s: string | undefined | null): void => {
     for (const t of tokenize(s ?? "")) {
       if (drop.has(t) || seen.has(t)) continue;
       seen.add(t);
-      ordered.push(t);
+      terms.push(t);
     }
   };
 
-  push(metadata.trackName);
-  if (listing) {
-    push(listing.subtitle);
-    push(listing.promotionalText);
-    const firstPara = (listing.description ?? "").split(/\n{2,}/)[0];
-    push(firstPara);
+  if (metadata.trackName.trim()) addPhrase(metadata.trackName);
+  if (listing?.subtitle?.trim()) addPhrase(listing.subtitle);
+  if (listing?.promotionalText?.trim()) addPhrase(listing.promotionalText);
+
+  const desc =
+    listing?.description?.trim() || metadata.itunesDescription?.trim() || "";
+  if (desc) {
+    const firstBlock = desc.split(/\n{2,}/)[0]?.trim() ?? "";
+    if (firstBlock.length > 0 && firstBlock.length <= 120) addPhrase(firstBlock);
   }
 
-  return ordered;
+  addTokens(metadata.trackName);
+  if (listing) {
+    addTokens(listing.subtitle);
+    addTokens(listing.promotionalText);
+    addTokens((listing.description ?? "").slice(0, 600));
+  }
+  addTokens(metadata.itunesDescription?.slice(0, 600));
+
+  return terms.slice(0, maxTerms);
 }
 
 export async function runCompetitorScan(input: {
@@ -302,15 +372,12 @@ export async function runCompetitorScan(input: {
   const logger = getLogger();
   const metrics = getMetrics();
   const metadata = input.metadata;
-  const targetTokens = tokenize(`${metadata.trackName} ${input.listing?.subtitle ?? ""}`);
+  const relevanceTokens = buildTargetRelevanceTokens(metadata, input.listing);
 
   const primaryGenreId =
     metadata.primaryGenreId ?? genreIdFor(metadata.primaryGenreName);
   const subGenreId = metadata.genreIds?.find((id) => id !== primaryGenreId);
-  const queryTokens = buildQueryTokens(metadata, input.listing).slice(
-    0,
-    MAX_TERM_QUERIES,
-  );
+  const searchTerms = buildSearchTerms(metadata, input.listing);
 
   const tryCountries = Array.from(
     new Set([metadata.storefront.toLowerCase(), "us"]),
@@ -442,7 +509,7 @@ export async function runCompetitorScan(input: {
       }
     }
 
-    for (const term of queryTokens) {
+    const runTermSearch = (term: string): void => {
       tasks.push(
         limit(async () => {
           try {
@@ -470,7 +537,9 @@ export async function runCompetitorScan(input: {
           }
         }),
       );
-    }
+    };
+
+    for (const term of searchTerms) runTermSearch(term);
 
     await Promise.all(tasks);
 
@@ -515,7 +584,12 @@ export async function runCompetitorScan(input: {
   }
 
   const skippedReasons: Record<string, number> = {};
-  const accepted: Array<{ appId: string; meta: CandidateMeta; full: SearchResult }> = [];
+  const accepted: Array<{
+    appId: string;
+    meta: CandidateMeta;
+    full: SearchResult;
+    relevance: number;
+  }> = [];
   for (const [appId, meta] of candidates) {
     if (appId === metadata.appId) {
       skippedReasons.targetSelf = (skippedReasons.targetSelf ?? 0) + 1;
@@ -546,7 +620,12 @@ export async function runCompetitorScan(input: {
       skippedReasons.sameDeveloper = (skippedReasons.sameDeveloper ?? 0) + 1;
       continue;
     }
-    accepted.push({ appId, meta, full });
+    const relevance = relevanceScore(relevanceTokens, full);
+    if (relevance < MIN_RELEVANCE_SCORE) {
+      skippedReasons.lowRelevance = (skippedReasons.lowRelevance ?? 0) + 1;
+      continue;
+    }
+    accepted.push({ appId, meta, full, relevance });
   }
 
   if (accepted.length > 0) {
@@ -565,11 +644,7 @@ export async function runCompetitorScan(input: {
     accepted.reduce((m, c) => Math.max(m, c.full.userRatingCount ?? 0), 0) || 1;
 
   const ranked: Array<Competitor & { _composite: number }> = accepted.map(
-    ({ appId, meta, full }) => {
-      const overlap = jaccard(
-        targetTokens,
-        tokenize(`${full.trackName ?? ""} `),
-      );
+    ({ appId, meta, full, relevance }) => {
       const sourceW = SOURCE_WEIGHT[meta.source];
       const chartSignal =
         meta.chartRank !== undefined
@@ -578,13 +653,15 @@ export async function runCompetitorScan(input: {
       const genreM = genreMatchScore(metadata, full);
       const pop = popularityScore(full.userRatingCount, maxRatingCount);
       const ratingQ = (full.averageUserRating ?? 0) / 5;
+      // Relevance (name + description overlap) dominates so generic chart toppers
+      // (e.g. Gmail in Productivity) lose to direct substitutes (Claude, Gemini).
       const composite =
-        0.30 * sourceW +
-        0.20 * chartSignal +
-        0.20 * overlap +
-        0.15 * genreM +
-        0.10 * pop +
-        0.05 * ratingQ;
+        0.38 * relevance +
+        0.12 * sourceW +
+        0.08 * chartSignal +
+        0.12 * genreM +
+        0.20 * pop +
+        0.10 * ratingQ;
       const competitor: Competitor = {
         appId,
         trackName: full.trackName ?? "(unknown)",
@@ -595,7 +672,7 @@ export async function runCompetitorScan(input: {
         appStoreUrl:
           full.trackViewUrl ??
           `https://apps.apple.com/${resolvedCountry}/app/id${appId}`,
-        overlapScore: Number(overlap.toFixed(4)),
+        overlapScore: Number(relevance.toFixed(4)),
         compositeScore: Number(composite.toFixed(4)),
         source: meta.source,
         ...(meta.chartRank !== undefined ? { chartRank: meta.chartRank } : {}),
@@ -635,7 +712,7 @@ export async function runCompetitorScan(input: {
 export const competitorScanTool = createTool({
   id: "competitor-scan",
   description:
-    "Selects the top 3 competitor apps for an App Store listing. Aggregates candidates from iTunes RSS top-free + top-grossing charts (genre-filtered), iTunes Search filtered by genre and sub-genre, and token-based iTunes Search using the app's title/subtitle/promo keywords. Filters out the target app itself, same-developer apps, and fledgling listings (<50 ratings), then ranks deterministically by a composite of source signal, chart rank, name-token overlap, genre match, popularity, and rating quality.",
+    "Selects the top 3 competitor apps for an App Store listing. Aggregates candidates from iTunes RSS top-free + top-grossing charts (genre-filtered), iTunes Search by genre/sub-genre, and phrase/token search derived from the app's listing copy. Filters out the target, same-developer apps, low-rating listings (<50 ratings), and candidates with low lexical overlap to the listing (generic chart leaders in the same category but different use case). Ranks by listing relevance first, then genre match, popularity, and chart signal.",
   // Only `metadata` is exposed to the LLM tool surface. The workflow's
   // pure-function call site additionally passes `listing` to enrich query
   // tokens (see runCompetitorScan signature). Mirroring the full ListingContent

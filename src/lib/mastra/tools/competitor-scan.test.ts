@@ -3,6 +3,9 @@ import {
   genreIdFor,
   tokenize,
   runCompetitorScan,
+  buildTargetRelevanceTokens,
+  buildSearchTerms,
+  relevanceScore,
 } from "./competitor-scan.tool";
 import type { AppMetadata, ListingContent } from "@/types/audit";
 
@@ -104,6 +107,93 @@ function makeFetchStub(
     return new Response("{}", { status: 200 });
   }) as unknown as typeof fetch;
 }
+
+const CHATGPT: AppMetadata = {
+  appId: "6448311069",
+  storefront: "us",
+  trackName: "ChatGPT",
+  artistName: "OpenAI",
+  primaryGenreName: "Productivity",
+  primaryGenreId: "6007",
+  genreIds: ["6007"],
+  genres: ["Productivity"],
+  artworkUrl: "https://apps.apple.com/icon.png",
+  appStoreUrl: "https://apps.apple.com/us/app/chatgpt/id6448311069",
+  averageUserRating: 4.8,
+  userRatingCount: 1_000_000,
+  price: 0,
+  currency: "USD",
+  contentAdvisoryRating: "12+",
+  releaseDate: "2023-05-18",
+  version: "1.0",
+  minimumOsVersion: "16.0",
+  itunesDescription:
+    "The official app by OpenAI. ChatGPT is your AI assistant for writing, learning, and chat.",
+};
+
+const CHATGPT_LISTING: ListingContent = {
+  title: "ChatGPT",
+  subtitle: "The official app by OpenAI",
+  description:
+    "Chat with the advanced AI assistant. Voice mode, image generation, and GPT-4o.",
+  releaseNotes: null,
+  promotionalText: "Your AI chat assistant",
+  screenshotUrls: [],
+  ipadScreenshotUrls: [],
+  hasAppPreviewVideo: false,
+  appPreviewVideoUrls: [],
+  sources: { metadata: "itunes", longText: "firecrawl", screenshots: "none" },
+};
+
+describe("buildSearchTerms", () => {
+  it("includes listing phrases and skips developer/genre noise", () => {
+    const terms = buildSearchTerms(TARGET, LISTING);
+    expect(terms[0]).toBe("Snapchat");
+    expect(terms.some((t) => t.toLowerCase().includes("share"))).toBe(true);
+    expect(terms).not.toContain("snap");
+    expect(terms).not.toContain("photo");
+    expect(terms).not.toContain("video");
+  });
+
+  it("derives terms from metadata when listing is missing", () => {
+    const terms = buildSearchTerms(CHATGPT);
+    expect(terms[0]).toBe("ChatGPT");
+    expect(terms.some((t) => t.includes("OpenAI") || t.includes("assistant"))).toBe(
+      true,
+    );
+  });
+});
+
+describe("relevance scoring", () => {
+  it("scores Gmail/Drive low vs ChatGPT but Gemini higher", () => {
+    const target = buildTargetRelevanceTokens(CHATGPT, CHATGPT_LISTING);
+    const gmail = relevanceScore(target, {
+      trackName: "Gmail – Email by Google",
+      artistName: "Google",
+      description: "Secure email from Google.",
+    });
+    const drive = relevanceScore(target, {
+      trackName: "Google Drive",
+      artistName: "Google",
+      description: "Store photos and files in the cloud.",
+    });
+    const gemini = relevanceScore(target, {
+      trackName: "Google Gemini",
+      artistName: "Google",
+      description:
+        "Your AI assistant from Google. Chat, voice, and image generation.",
+    });
+    const claude = relevanceScore(target, {
+      trackName: "Claude by Anthropic",
+      artistName: "Anthropic",
+      description: "AI assistant for chat, writing, and coding.",
+    });
+    expect(gmail).toBeLessThan(0.06);
+    expect(drive).toBeLessThan(0.06);
+    expect(gemini).toBeGreaterThan(0.06);
+    expect(claude).toBeGreaterThan(0.06);
+  });
+});
 
 describe("runCompetitorScan", () => {
   const realFetch = globalThis.fetch;
@@ -254,6 +344,126 @@ describe("runCompetitorScan", () => {
     expect(result.fallbackReason).toMatch(/no competitor/i);
   });
 
+  it("filters low-relevance same-genre chart leaders via listing overlap", async () => {
+    globalThis.fetch = makeFetchStub({
+      "/rss/topfreeapplications": {
+        jsonValue: {
+          feed: {
+            entry: [
+              {
+                id: { attributes: { "im:id": "6448311069" } },
+                "im:name": { label: "ChatGPT" },
+                "im:artist": { label: "OpenAI" },
+                category: { attributes: { "im:id": "6007", label: "Productivity" } },
+              },
+              {
+                id: { attributes: { "im:id": "1001" } },
+                "im:name": { label: "Gmail – Email by Google" },
+                "im:artist": { label: "Google" },
+                category: { attributes: { "im:id": "6007", label: "Productivity" } },
+              },
+              {
+                id: { attributes: { "im:id": "1002" } },
+                "im:name": { label: "Google Drive" },
+                "im:artist": { label: "Google" },
+                category: { attributes: { "im:id": "6007", label: "Productivity" } },
+              },
+              {
+                id: { attributes: { "im:id": "1003" } },
+                "im:name": { label: "Google Gemini" },
+                "im:artist": { label: "Google" },
+                category: { attributes: { "im:id": "6007", label: "Productivity" } },
+              },
+            ],
+          },
+        },
+      },
+      "/rss/topgrossingapplications": {
+        jsonValue: { feed: { entry: [] } },
+      },
+      "/lookup?id=": {
+        jsonValue: {
+          results: [
+            {
+              trackId: 1001,
+              trackName: "Gmail – Email by Google",
+              artistName: "Google",
+              primaryGenreName: "Productivity",
+              description: "Secure email from Google.",
+              averageUserRating: 4.72,
+              userRatingCount: 2_410_220,
+            },
+            {
+              trackId: 1002,
+              trackName: "Google Drive",
+              artistName: "Google",
+              primaryGenreName: "Productivity",
+              description: "Cloud storage for files and photos.",
+              averageUserRating: 4.78,
+              userRatingCount: 7_557_043,
+            },
+            {
+              trackId: 1003,
+              trackName: "Google Gemini",
+              artistName: "Google",
+              primaryGenreName: "Productivity",
+              description:
+                "AI assistant with chat, voice, and image generation like ChatGPT.",
+              averageUserRating: 4.72,
+              userRatingCount: 1_739_805,
+            },
+            {
+              trackId: 2001,
+              trackName: "Claude by Anthropic",
+              artistName: "Anthropic",
+              primaryGenreName: "Productivity",
+              description: "AI chat assistant for writing and coding.",
+              averageUserRating: 4.8,
+              userRatingCount: 500_000,
+            },
+          ],
+        },
+      },
+      "/search?": {
+        jsonValue: {
+          results: [
+            {
+              trackId: 2001,
+              trackName: "Claude by Anthropic",
+              artistName: "Anthropic",
+              primaryGenreName: "Productivity",
+              description: "AI chat assistant for writing and coding.",
+              averageUserRating: 4.8,
+              userRatingCount: 500_000,
+            },
+            {
+              trackId: 2002,
+              trackName: "Perplexity - AI Search",
+              artistName: "Perplexity AI",
+              primaryGenreName: "Productivity",
+              description: "AI search and chat answers with sources.",
+              averageUserRating: 4.7,
+              userRatingCount: 300_000,
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await runCompetitorScan({
+      metadata: CHATGPT,
+      listing: CHATGPT_LISTING,
+    });
+
+    const names = result.competitors.map((c) => c.trackName);
+    expect(names).not.toContain("Gmail – Email by Google");
+    expect(names).not.toContain("Google Drive");
+    expect(names.some((n) => /claude|gemini|perplexity/i.test(n))).toBe(true);
+    for (const c of result.competitors) {
+      expect(c.overlapScore).toBeGreaterThanOrEqual(0.06);
+    }
+  });
+
   it("falls back to the US storefront when target storefront is empty", async () => {
     const calls: string[] = [];
     globalThis.fetch = ((url: RequestInfo | URL) => {
@@ -271,10 +481,10 @@ describe("runCompetitorScan", () => {
               entry: [
                 {
                   id: { attributes: { "im:id": "6666" } },
-                  "im:name": { label: "Line" },
-                  "im:artist": { label: "LY Corp." },
+                  "im:name": { label: "Instagram" },
+                  "im:artist": { label: "Instagram, Inc." },
                   category: {
-                    attributes: { "im:id": "6005", label: "Social Networking" },
+                    attributes: { "im:id": "6008", label: "Photo & Video" },
                   },
                 },
               ],
@@ -289,11 +499,14 @@ describe("runCompetitorScan", () => {
             results: [
               {
                 trackId: 6666,
-                trackName: "Line",
-                artistName: "LY Corp.",
-                primaryGenreName: "Social Networking",
-                averageUserRating: 4.2,
-                userRatingCount: 200_000,
+                trackName: "Instagram",
+                artistName: "Instagram, Inc.",
+                primaryGenreName: "Photo & Video",
+                genres: ["Photo & Video", "Social Networking"],
+                description:
+                  "Share photos and videos with friends. A fast fun way to share the moment.",
+                averageUserRating: 4.7,
+                userRatingCount: 24_000_000,
               },
             ],
           }),
