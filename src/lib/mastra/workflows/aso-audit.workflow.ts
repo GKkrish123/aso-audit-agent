@@ -96,10 +96,7 @@ const awaitConfirmationStep = createStep({
   }),
   execute: async ({ inputData, resumeData, suspend }) => {
     if (!resumeData) {
-      await suspend({ confirmation: inputData.confirmation });
-      // suspend() never resolves on first invocation; the next run path is
-      // guarded by the `if (!resumeData)` branch above.
-      return { parsed: inputData.parsed, metadata: inputData.metadata };
+      return suspend({ confirmation: inputData.confirmation });
     }
     if (!resumeData.confirmed) {
       throw new Error(

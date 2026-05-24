@@ -79,11 +79,17 @@ export function AuditChat() {
   const [creatingChat, setCreatingChat] = useState(false);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(true);
+  const [switchingChat, setSwitchingChat] = useState(false);
   const [activeJob, setActiveJob] = useState<AuditJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [confirmPending, setConfirmPending] = useState(false);
   const sidebarOpen = useSidebarOpen();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const loadChatRequestRef = useRef(0);
+  const activeChatIdRef = useRef<string | null>(null);
+  const switchingChatRef = useRef(false);
+  activeChatIdRef.current = activeChatId;
+  switchingChatRef.current = switchingChat;
 
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
 
@@ -219,17 +225,39 @@ export function AuditChat() {
 
   const loadChat = useCallback(
     async (chatId: string) => {
+      if (chatId === activeChatIdRef.current && !switchingChatRef.current) return;
+
+      const requestId = ++loadChatRequestRef.current;
+      setSwitchingChat(true);
       setActiveChatId(chatId);
       window.localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
       setInput("");
-      setMessages(makeWelcome());
+      setMessages([]);
       setActiveJob(null);
       setConfirmPending(false);
-      const res = await fetch(`/api/chats/${chatId}`);
-      if (!res.ok) throw new Error("Failed to load chat");
-      const data = (await res.json()) as { chat: ChatRecord };
-      setActiveJob(data.chat.job);
-      if (data.chat.job) rehydrateFromJob(data.chat.job);
+      try {
+        const res = await fetch(`/api/chats/${chatId}`);
+        if (requestId !== loadChatRequestRef.current) return;
+        if (!res.ok) throw new Error("Failed to load chat");
+        const data = (await res.json()) as { chat: ChatRecord };
+        if (requestId !== loadChatRequestRef.current) return;
+        setActiveJob(data.chat.job);
+        if (data.chat.job) {
+          rehydrateFromJob(data.chat.job);
+        } else {
+          setMessages(makeWelcome());
+        }
+      } catch (err) {
+        if (requestId !== loadChatRequestRef.current) return;
+        toast.error("Could not load chat", {
+          description: (err as Error).message,
+        });
+        setMessages(makeWelcome());
+      } finally {
+        if (requestId === loadChatRequestRef.current) {
+          setSwitchingChat(false);
+        }
+      }
     },
     [makeWelcome, rehydrateFromJob],
   );
@@ -557,21 +585,6 @@ export function AuditChat() {
     [handlePostRemoval],
   );
 
-  const chatTitle = useMemo(() => {
-    return activeJob?.metadata?.trackName ?? "New chat";
-  }, [activeJob?.metadata?.trackName]);
-
-  const activeStatus = useMemo(() => {
-    if (!activeJob) return "Awaiting URL";
-    if (activeJob.status === "awaiting_confirmation") return "Awaiting confirmation";
-    if (activeJob.status === "running_audit") return "Running";
-    if (activeJob.status === "fetching_metadata") return "Fetching metadata";
-    if (activeJob.status === "completed") return "Completed";
-    if (activeJob.status === "failed") return "Failed";
-    if (activeJob.status === "cancelled") return "Cancelled";
-    return "Queued";
-  }, [activeJob]);
-
   const activeChatRecord = useMemo(() => {
     if (!activeChatId) return null;
     return (
@@ -581,10 +594,36 @@ export function AuditChat() {
     );
   }, [activeChatId, archivedChats, chats]);
 
+  const chatTitle = useMemo(() => {
+    return (
+      activeJob?.metadata?.trackName ??
+      activeChatRecord?.job?.metadata?.trackName ??
+      "New chat"
+    );
+  }, [activeChatRecord?.job?.metadata?.trackName, activeJob?.metadata?.trackName]);
+
+  const activeStatus = useMemo(() => {
+    if (switchingChat) return "Loading…";
+    if (!activeJob) return "Awaiting URL";
+    if (activeJob.status === "awaiting_confirmation") return "Awaiting confirmation";
+    if (activeJob.status === "running_audit") return "Running";
+    if (activeJob.status === "fetching_metadata") return "Fetching metadata";
+    if (activeJob.status === "completed") return "Completed";
+    if (activeJob.status === "failed") return "Failed";
+    if (activeJob.status === "cancelled") return "Cancelled";
+    return "Queued";
+  }, [activeJob, switchingChat]);
+
   const activeChatArchived = activeChatRecord?.archivedAt != null;
 
+  const messagesLoading = chatLoading || switchingChat;
+
   const inputDisabled =
-    submitting || !activeChatId || activeJob != null || activeChatArchived;
+    submitting ||
+    !activeChatId ||
+    activeJob != null ||
+    activeChatArchived ||
+    messagesLoading;
 
   return (
     <div className="relative flex h-full min-h-0">
@@ -716,12 +755,8 @@ export function AuditChat() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-2 md:px-4 py-2 md:py-6">
           <div className="mx-auto flex min-w-0 max-w-2xl flex-col gap-4 md:max-w-4xl">
-            {chatLoading ? (
-              <Card className="max-w-2xl">
-                <CardContent className="py-6 text-sm text-muted-foreground">
-                  Loading chats...
-                </CardContent>
-              </Card>
+            {messagesLoading ? (
+              <ChatLoadingSkeleton label={chatLoading ? "Loading chats…" : "Loading chat…"} />
             ) : (
               messages.map((m) => (
                 <MessageRow
@@ -754,11 +789,13 @@ export function AuditChat() {
                   }
                 }}
                 placeholder={
-                  activeChatArchived
-                    ? "This chat is archived. Restore it to continue, or start a new chat."
-                    : inputDisabled
-                      ? "This chat already has one audit. Start a new chat."
-                      : "Paste an App Store URL, e.g. https://apps.apple.com/us/app/id324684580"
+                  messagesLoading
+                    ? "Loading chat…"
+                    : activeChatArchived
+                      ? "This chat is archived. Restore it to continue, or start a new chat."
+                      : inputDisabled
+                        ? "This chat already has one audit. Start a new chat."
+                        : "Paste an App Store URL, e.g. https://apps.apple.com/us/app/id324684580"
                 }
                 rows={1}
                 className="min-h-12 resize-none text-xs md:text-sm"
@@ -809,6 +846,29 @@ export function AuditChat() {
             One app audit per chat. Apple App Store URLs only.
           </p>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatLoadingSkeleton({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        <span>{label}</span>
+      </div>
+      <div className="flex items-start gap-3">
+        <Skeleton className="size-8 shrink-0 rounded-full" />
+        <Skeleton className="h-16 w-3/4 max-w-md rounded-2xl" />
+      </div>
+      <div className="flex flex-row-reverse items-start gap-3">
+        <Skeleton className="size-8 shrink-0 rounded-full" />
+        <Skeleton className="h-10 w-1/2 max-w-xs rounded-2xl" />
+      </div>
+      <div className="flex items-start gap-3">
+        <Skeleton className="size-8 shrink-0 rounded-full" />
+        <Skeleton className="h-24 w-full max-w-lg rounded-2xl" />
       </div>
     </div>
   );

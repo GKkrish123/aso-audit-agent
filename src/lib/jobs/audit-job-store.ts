@@ -123,20 +123,28 @@ function getStepOutput(
   return out && typeof out === "object" ? (out as Record<string, unknown>) : undefined;
 }
 
+function isAwaitingConfirmation(snapshot: SnapshotShape): boolean {
+  const confirmStep = snapshot.steps?.["await-confirmation"];
+  if (confirmStep?.status === "suspended") return true;
+  if (snapshot.status === "suspended") {
+    return Boolean(snapshot.suspendedPaths && "await-confirmation" in snapshot.suspendedPaths);
+  }
+  const auditStep = snapshot.steps?.["run-audit"];
+  if (auditStep?.status === "success" || auditStep?.status === "running") return false;
+  const fetchStep = snapshot.steps?.["fetch-metadata"];
+  return fetchStep?.status === "success";
+}
+
 function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
   const raw = snapshot.status;
   if (raw === "success") return "completed";
   if (raw === "failed") return "failed";
   if (raw === "cancelled" || raw === "canceled") return "cancelled";
-  if (raw === "suspended") {
-    const isAwaitingConfirmation = Boolean(
-      snapshot.suspendedPaths && "await-confirmation" in snapshot.suspendedPaths,
-    );
-    return isAwaitingConfirmation ? "awaiting_confirmation" : "running_audit";
-  }
+  if (isAwaitingConfirmation(snapshot)) return "awaiting_confirmation";
+  if (raw === "suspended") return "running_audit";
   if (raw === "running" || raw === "waiting") {
     const fetchStep = snapshot.steps?.["fetch-metadata"];
-    if (fetchStep?.status === "success") return "running_audit";
+    if (fetchStep?.status === "success") return "awaiting_confirmation";
     return "fetching_metadata";
   }
   return "queued";
@@ -511,9 +519,9 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
 
   logger.info({ jobId, chatId: input.chatId, runId: run.runId }, "audit job created");
 
-  // Start the workflow but don't await the full result - it will suspend at
-  // the await-confirmation step and we want the API to return immediately.
-  // The promise is kept alive in the background; Mastra persists snapshots.
+  // Start the workflow but don't await the full result — it suspends at
+  // await-confirmation. Keep this request alive until the suspend snapshot is
+  // persisted so Vercel/serverless doesn't return before the gate is saved.
   run
     .start({ inputData: { url: input.url } })
     .catch((err) => {
@@ -523,10 +531,24 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
       );
     });
 
-  // Briefly wait for the first step to complete so we can return the
-  // confirmation card immediately. We poll the snapshot rather than awaiting
-  // the run since the run resolves only when fully done or rejected.
-  await new Promise((r) => setTimeout(r, 100));
+  return await waitForConfirmationGate(jobId);
+}
+
+async function waitForConfirmationGate(jobId: string): Promise<AuditJob> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const job = await getAuditJob(jobId);
+    if (job.status === "awaiting_confirmation") return job;
+    if (job.status === "failed" || job.status === "cancelled") return job;
+    if (job.status === "running_audit" || job.status === "completed") {
+      getLogger().error(
+        { jobId, status: job.status },
+        "workflow passed confirmation gate before user confirmed",
+      );
+      return job;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
   return await getAuditJob(jobId);
 }
 
