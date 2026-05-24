@@ -65,6 +65,11 @@ function isTerminal(s: AuditJob["status"]): boolean {
   return TERMINAL.includes(s);
 }
 
+/** Poll only while the server is actively working — not while waiting for user confirm. */
+function shouldPollJobStatus(s: AuditJob["status"]): boolean {
+  return s === "queued" || s === "fetching_metadata" || s === "running_audit";
+}
+
 export function AuditChat() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -329,7 +334,7 @@ export function AuditChat() {
 
   useEffect(() => {
     if (!activeJobId || activeJobStatus == null) return;
-    if (isTerminal(activeJobStatus)) return;
+    if (!shouldPollJobStatus(activeJobStatus)) return;
     const interval = window.setInterval(async () => {
       try {
         const res = await fetch(`/api/audit/${activeJobId}`);
@@ -408,6 +413,11 @@ export function AuditChat() {
     async (confirmed: boolean) => {
       if (!activeJob) return;
       setConfirmPending(true);
+      if (confirmed) {
+        const optimistic = { ...activeJob, status: "running_audit" as const };
+        setActiveJob(optimistic);
+        applyJobTransition(optimistic);
+      }
       try {
         const res = await fetch(`/api/audit/${activeJob.jobId}/confirm`, {
           method: "POST",
@@ -445,6 +455,9 @@ export function AuditChat() {
         applyJobTransition(data.job);
         await refreshChats();
       } catch (err) {
+        if (confirmed) {
+          setActiveJob(activeJob);
+        }
         toast.error("Confirmation failed", { description: (err as Error).message });
       } finally {
         setConfirmPending(false);

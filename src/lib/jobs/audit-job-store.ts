@@ -1,4 +1,5 @@
 import "server-only";
+import { after } from "next/server";
 import { nanoid } from "nanoid";
 import { createClient, type Client } from "@libsql/client";
 import { getLogger } from "@/lib/observability/logger";
@@ -125,14 +126,12 @@ function getStepOutput(
 
 function isAwaitingConfirmation(snapshot: SnapshotShape): boolean {
   const confirmStep = snapshot.steps?.["await-confirmation"];
+  if (confirmStep?.status === "success") return false;
   if (confirmStep?.status === "suspended") return true;
   if (snapshot.status === "suspended") {
     return Boolean(snapshot.suspendedPaths && "await-confirmation" in snapshot.suspendedPaths);
   }
-  const auditStep = snapshot.steps?.["run-audit"];
-  if (auditStep?.status === "success" || auditStep?.status === "running") return false;
-  const fetchStep = snapshot.steps?.["fetch-metadata"];
-  return fetchStep?.status === "success";
+  return false;
 }
 
 function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
@@ -143,8 +142,12 @@ function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
   if (isAwaitingConfirmation(snapshot)) return "awaiting_confirmation";
   if (raw === "suspended") return "running_audit";
   if (raw === "running" || raw === "waiting") {
+    const auditStep = snapshot.steps?.["run-audit"];
+    if (auditStep?.status === "running" || auditStep?.status === "success") {
+      return "running_audit";
+    }
     const fetchStep = snapshot.steps?.["fetch-metadata"];
-    if (fetchStep?.status === "success") return "awaiting_confirmation";
+    if (fetchStep?.status === "success") return "running_audit";
     return "fetching_metadata";
   }
   return "queued";
@@ -592,6 +595,21 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
  * the suspended state cleanly instead of leaking. Returns `null` to signal
  * the binding has been released.
  */
+async function waitForAuditRunning(jobId: string): Promise<AuditJob> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const job = await getAuditJob(jobId);
+    if (job.status === "running_audit" || job.status === "completed") return job;
+    if (job.status === "failed" || job.status === "cancelled") return job;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const job = await getAuditJob(jobId);
+  if (job.status === "awaiting_confirmation") {
+    throw new Error("Audit did not start after confirmation");
+  }
+  return job;
+}
+
 export async function confirmAuditJob(
   jobId: string,
   confirmed: boolean,
@@ -601,7 +619,7 @@ export async function confirmAuditJob(
   const mastra = getMastra();
   const workflow = mastra.getWorkflow("asoAuditWorkflow");
   const run = await workflow.createRun({ runId: idx.runId });
-  run
+  const resumeWork = run
     .resume({ step: "await-confirmation", resumeData: { confirmed } })
     .catch((err) => {
       if (confirmed) {
@@ -611,6 +629,10 @@ export async function confirmAuditJob(
         );
       }
     });
+
+  after(async () => {
+    await resumeWork;
+  });
 
   await ensureSchema();
 
@@ -642,6 +664,5 @@ export async function confirmAuditJob(
       args: [Date.now(), idx.chatId],
     },
   ]);
-  await new Promise((r) => setTimeout(r, 50));
-  return await getAuditJob(jobId);
+  return await waitForAuditRunning(jobId);
 }
