@@ -921,8 +921,8 @@ export function AuditChat() {
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-2 md:px-4 py-2 md:py-6">
-          <div className="mx-auto flex min-w-0 max-w-2xl flex-col gap-4 md:max-w-4xl">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-1 md:px-4 py-2 md:py-6">
+          <div className="mx-auto flex min-w-0 max-w-2xl flex-col gap-4 md:max-w-5xl">
             {messagesLoading ? (
               <ChatLoadingSkeleton label={chatLoading ? "Loading chats…" : "Loading chat…"} />
             ) : (

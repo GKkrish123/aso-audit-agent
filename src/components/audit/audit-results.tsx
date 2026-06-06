@@ -837,7 +837,7 @@ function RecommendationCard({
           {mediaGalleryIndex !== null ? (
             <MediaGalleryTrigger
               index={mediaGalleryIndex}
-              className="wrap-break-word underline decoration-dotted underline-offset-2"
+              className="wrap-anywhere underline decoration-dotted underline-offset-2"
             >
               {rec.metric.current}
             </MediaGalleryTrigger>
@@ -1082,7 +1082,7 @@ function CompetitorComparisonSection({
             : `Side-by-side vs. ${rows.length} ${rows.length === 1 ? "peer" : "peers"} ranked by listing similarity. All numbers and deltas are computed deterministically from the iTunes payload — no LLM-generated values.`}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="min-w-0 overflow-x-hidden">
         {rows.length === 0 ? (
           <Alert>
             <AlertCircle className="size-4" />
@@ -1122,40 +1122,40 @@ function CompetitorComparisonSection({
 function YourAppRow({ metadata }: { metadata: AppMetadata }) {
   return (
     <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
             <Badge className="bg-primary/15 text-primary border-primary/30 px-2 py-0.5 text-[10px] uppercase tracking-wider">
               Your app
             </Badge>
-            <span className="truncate text-sm font-semibold">
+            <span className="text-sm font-semibold wrap-break-word">
               {metadata.trackName}
             </span>
           </div>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground wrap-break-word">
             {metadata.artistName}
             {metadata.primaryGenreName ? ` • ${metadata.primaryGenreName}` : ""}
             {metadata.storefront ? ` • ${metadata.storefront.toUpperCase()}` : ""}
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-4 text-right">
-          <div>
+        <div className="grid w-full grid-cols-2 gap-3 border-t border-primary/20 pt-3 sm:w-auto sm:shrink-0 sm:gap-4 sm:border-0 sm:pt-0">
+          <div className="min-w-0 sm:text-right">
             <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
               Rating
             </p>
-            <p className="flex items-center justify-end gap-1 text-sm font-medium tabular-nums">
-              <Star className="size-3.5 fill-amber-500 text-amber-500" />
+            <p className="flex items-center gap-1 text-sm font-medium tabular-nums sm:justify-end">
+              <Star className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
               {metadata.averageUserRating !== null && metadata.averageUserRating !== undefined
                 ? metadata.averageUserRating.toFixed(2)
                 : "—"}
             </p>
           </div>
-          <div>
+          <div className="min-w-0 sm:text-right">
             <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
               Volume
             </p>
-            <p className="flex items-center justify-end gap-1 text-sm font-medium tabular-nums">
-              <Users className="size-3.5 text-muted-foreground" />
+            <p className="flex items-center gap-1 text-sm font-medium tabular-nums sm:justify-end">
+              <Users className="size-3.5 shrink-0 text-muted-foreground" />
               {compactNumber(metadata.userRatingCount ?? null)}
             </p>
           </div>
@@ -1183,23 +1183,23 @@ function CompetitorRow({
 
   return (
     <div className="rounded-lg border bg-card p-3 transition hover:border-primary/30">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <a
               href={row.appStoreUrl}
               target="_blank"
               rel="noreferrer noopener"
-              className="group inline-flex items-center gap-1 text-sm font-semibold hover:text-primary"
+              className="group inline-flex min-w-0 max-w-full items-start gap-1 text-sm font-semibold hover:text-primary"
             >
-              <span className="truncate">{row.competitorName}</span>
-              <ExternalLink className="size-3.5 opacity-50 transition group-hover:opacity-100" />
+              <span className="wrap-break-word">{row.competitorName}</span>
+              <ExternalLink className="mt-0.5 size-3.5 shrink-0 opacity-50 transition group-hover:opacity-100" />
             </a>
             {sourcePill && (
               <Badge
                 variant="outline"
                 className={cn(
-                  "px-1.5 py-0 text-[10px] font-medium uppercase tracking-wide",
+                  "max-w-full px-1.5 py-0 text-[10px] font-medium uppercase tracking-wide wrap-break-word",
                   row.source === "top-free-chart" ||
                     row.source === "top-grossing-chart"
                     ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
@@ -1210,19 +1210,19 @@ function CompetitorRow({
               </Badge>
             )}
           </div>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground wrap-break-word">
             {row.developerName}
             {row.category ? ` • ${row.category}` : ""}
           </p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-4 text-right">
+        <div className="grid w-full grid-cols-2 gap-3 border-t pt-3 sm:w-auto sm:shrink-0 sm:gap-4 sm:border-0 sm:pt-0">
           <ComparisonStat
             label="Rating"
             value={
               row.rating !== null ? (
-                <span className="flex items-center justify-end gap-1 tabular-nums">
-                  <Star className="size-3.5 fill-amber-500 text-amber-500" />
+                <span className="flex items-center gap-1 tabular-nums sm:justify-end">
+                  <Star className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
                   {row.rating.toFixed(2)}
                 </span>
               ) : (
@@ -1243,8 +1243,8 @@ function CompetitorRow({
           <ComparisonStat
             label="Volume"
             value={
-              <span className="flex items-center justify-end gap-1 tabular-nums">
-                <Users className="size-3.5 text-muted-foreground" />
+              <span className="flex items-center gap-1 tabular-nums sm:justify-end">
+                <Users className="size-3.5 shrink-0 text-muted-foreground" />
                 {compactNumber(row.ratingCount)}
               </span>
             }
@@ -1269,25 +1269,25 @@ function CompetitorRow({
               <Badge
                 key={`s-${i}`}
                 variant="outline"
-                className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                className="h-auto max-w-full whitespace-normal border-amber-500/30 bg-amber-500/10 py-0.5 text-left text-amber-700 dark:text-amber-300"
               >
-                <ArrowUp className="mr-0.5 size-3" /> {s}
+                <ArrowUp className="mr-0.5 inline size-3 shrink-0" /> {s}
               </Badge>
             ))}
             {row.weaknesses.map((w, i) => (
               <Badge
                 key={`w-${i}`}
                 variant="outline"
-                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                className="h-auto max-w-full whitespace-normal border-emerald-500/30 bg-emerald-500/10 py-0.5 text-left text-emerald-700 dark:text-emerald-300"
               >
-                <ArrowDown className="mr-0.5 size-3" /> {w}
+                <ArrowDown className="mr-0.5 inline size-3 shrink-0" /> {w}
               </Badge>
             ))}
           </div>
         )}
 
         {row.notes && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-muted-foreground wrap-break-word">
             {row.notes}
           </p>
         )}
@@ -1306,12 +1306,12 @@ function ComparisonStat({
   delta: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="min-w-0">
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
       <p className="text-sm font-medium">{value}</p>
-      {delta && <div className="mt-0.5 flex justify-end">{delta}</div>}
+      {delta && <div className="mt-0.5">{delta}</div>}
     </div>
   );
 }
@@ -1393,21 +1393,20 @@ function OverlapBar({
     composite !== null ? Math.max(0, Math.min(100, composite * 100)) : null;
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
+      <div className="mb-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] leading-snug text-muted-foreground">
         <span>
           <span className="font-medium text-foreground">{overlapPct.toFixed(0)}%</span>{" "}
           keyword overlap
-          {compositePct !== null && (
-            <>
-              {" "}
-              •{" "}
-              <span className="font-medium text-foreground">
-                {compositePct.toFixed(0)}%
-              </span>{" "}
-              similarity
-            </>
-          )}
         </span>
+        {compositePct !== null && (
+          <span>
+            <span aria-hidden="true">•</span>{" "}
+            <span className="font-medium text-foreground">
+              {compositePct.toFixed(0)}%
+            </span>{" "}
+            similarity
+          </span>
+        )}
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div
@@ -1462,49 +1461,58 @@ function MediaLightbox({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className="items-stretch justify-stretch p-0 sm:items-center sm:justify-center sm:p-4">
         <DialogTitle className="sr-only">
           {appName} — {item?.label ?? "Media"}
         </DialogTitle>
 
         {item && (
-          <div className="relative flex h-full w-full max-w-6xl flex-col items-center justify-center gap-3">
-            <div className="flex w-full items-center justify-between gap-3 px-2 text-white">
-              <div className="flex items-center gap-2">
+          <div className="relative flex h-dvh w-full max-w-6xl flex-col bg-black/95 sm:h-auto sm:max-h-[95dvh] sm:bg-transparent">
+            <div className="flex shrink-0 flex-row items-center gap-1.5 border-b border-white/10 px-2 pb-1.5 pt-12 sm:justify-between sm:gap-2 sm:border-0 sm:px-2 sm:pb-0 sm:pt-0">
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 text-white sm:flex-wrap sm:gap-2">
                 <Badge
                   variant="outline"
-                  className="border-white/30 bg-white/10 px-1.5 py-0 text-[10px] uppercase tracking-wider text-white"
+                  className="shrink-0 border-white/30 bg-white/10 px-1 py-0 text-[9px] uppercase tracking-wider text-white sm:px-1.5 sm:text-[10px]"
                 >
-                  {item.kind === "icon"
-                    ? "App icon"
-                    : item.kind === "iphone"
-                      ? "iPhone"
-                      : item.kind === "ipad"
-                        ? "iPad"
-                        : "Video"}
+                  {item.kind === "icon" ? (
+                    <>
+                      <span className="sm:hidden">Icon</span>
+                      <span className="hidden sm:inline">App icon</span>
+                    </>
+                  ) : item.kind === "iphone" ? (
+                    "iPhone"
+                  ) : item.kind === "ipad" ? (
+                    "iPad"
+                  ) : (
+                    "Video"
+                  )}
                 </Badge>
-                <span className="text-sm font-medium">{item.label}</span>
-                <span className="text-xs text-white/60 tabular-nums">
-                  {currentIndex + 1} / {items.length}
+                <span className="min-w-0 flex-1 truncate text-xs font-medium sm:flex-none sm:text-sm sm:wrap-break-word">
+                  {item.label}
+                </span>
+                <span className="shrink-0 text-[10px] text-white/60 tabular-nums sm:text-xs">
+                  {currentIndex + 1}/{items.length}
                 </span>
               </div>
               <a
                 href={item.url}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 rounded-md border border-white/20 bg-white/10 px-2 py-1 text-xs text-white hover:bg-white/20"
+                aria-label="Open original"
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white hover:bg-white/20 sm:h-auto sm:w-auto sm:gap-1.5 sm:rounded-md sm:px-2.5 sm:py-1.5 sm:text-xs"
               >
-                <ExternalLink className="size-3" />
-                Open original
+                <ExternalLink className="size-3.5 shrink-0" />
+                <span className="hidden sm:inline">Open original</span>
               </a>
             </div>
-            <div className="relative flex max-h-[80vh] w-full flex-1 items-center justify-center">
+
+            <div className="relative flex min-h-0 flex-1 items-center justify-center px-14 py-2 sm:max-h-[75dvh] sm:px-16">
               {items.length > 1 && (
                 <button
                   type="button"
                   onClick={prev}
                   aria-label="Previous"
-                  className="absolute left-0 z-10 inline-flex size-10 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white transition hover:bg-black/60 focus:outline-none focus:ring-2 focus:ring-white/40 md:-left-12"
+                  className="absolute left-2 z-10 inline-flex size-11 touch-manipulation items-center justify-center rounded-full border border-white/20 bg-black/50 text-white transition hover:bg-black/70 focus:outline-none focus:ring-2 focus:ring-white/40 sm:left-0 sm:size-10 md:-left-12"
                 >
                   <ChevronLeft className="size-5" />
                 </button>
@@ -1516,6 +1524,7 @@ function MediaLightbox({
                   src={item.url}
                   poster={item.posterUrl}
                   active={open}
+                  className="max-h-full max-w-full sm:max-h-[75dvh]"
                 />
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -1524,7 +1533,7 @@ function MediaLightbox({
                   src={item.url}
                   alt={item.label}
                   className={cn(
-                    "max-h-[80vh] max-w-full rounded-md bg-black object-contain",
+                    "max-h-full max-w-full rounded-md bg-black object-contain sm:max-h-[75dvh]",
                     item.kind === "icon" && "rounded-2xl",
                   )}
                 />
@@ -1535,27 +1544,28 @@ function MediaLightbox({
                   type="button"
                   onClick={next}
                   aria-label="Next"
-                  className="absolute right-0 z-10 inline-flex size-10 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white transition hover:bg-black/60 focus:outline-none focus:ring-2 focus:ring-white/40 md:-right-12"
+                  className="absolute right-2 z-10 inline-flex size-11 touch-manipulation items-center justify-center rounded-full border border-white/20 bg-black/50 text-white transition hover:bg-black/70 focus:outline-none focus:ring-2 focus:ring-white/40 sm:right-0 sm:size-10 md:-right-12"
                 >
                   <ChevronRight className="size-5" />
                 </button>
               )}
             </div>
+
             {items.length > 1 && (
-              <div className="flex w-full max-w-full justify-center gap-1.5 overflow-x-auto px-2 py-1">
+              <div className="flex shrink-0 snap-x snap-mandatory gap-1 overflow-x-auto overscroll-x-contain px-2 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] [-webkit-overflow-scrolling:touch] sm:justify-center sm:gap-1.5 sm:px-2 sm:py-3 sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
                 {items.map((it, i) => (
                   <button
                     key={`thumb-${i}`}
                     type="button"
                     onClick={() => onIndexChange(i)}
                     aria-label={`Jump to ${it.label}`}
+                    aria-current={i === currentIndex ? "true" : undefined}
                     className={cn(
-                      "shrink-0 overflow-hidden rounded-sm border-2 transition",
+                      "h-8 w-5 shrink-0 snap-center touch-manipulation overflow-hidden rounded-sm border transition sm:h-14 sm:w-9 sm:rounded-sm",
                       i === currentIndex
                         ? "border-white"
                         : "border-transparent opacity-60 hover:opacity-100",
                     )}
-                    style={{ width: 36, height: 56 }}
                   >
                     {it.kind === "video" ? (
                       it.posterUrl ? (
@@ -1568,7 +1578,7 @@ function MediaLightbox({
                         />
                       ) : (
                         <div className="flex h-full w-full items-center justify-center bg-black">
-                          <Play className="size-3 fill-white text-white" />
+                          <Play className="size-3 fill-white text-white sm:size-4" />
                         </div>
                       )
                     ) : (
