@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  classifyProductArchetype,
+  intentFromArchetype,
+  listingBlurb,
+} from "@/lib/aso/competitor-product-archetypes";
 import { getEnv } from "@/lib/env";
 import { getLogger } from "@/lib/observability/logger";
 import type { AppMetadata, ListingContent } from "@/types/audit";
@@ -18,22 +23,6 @@ export const CompetitorSearchIntentSchema = z.object({
 
 export type CompetitorSearchIntent = z.infer<typeof CompetitorSearchIntentSchema>;
 
-const STREAMING_SIGNALS =
-  /\b(stream|streaming|watch|viewer|viewers|subscribe|channel|channels|shorts|livestream|binge|broadcast)\b/i;
-const EDITING_SIGNALS =
-  /\b(edit|editor|editing|trim|splice|capcut|imovie|maker|montage|filter effects|timeline)\b/i;
-
-function listingBlurb(metadata: AppMetadata, listing?: ListingContent): string {
-  const parts = [
-    metadata.trackName,
-    listing?.subtitle,
-    listing?.promotionalText,
-    listing?.description?.slice(0, 1200),
-    metadata.itunesDescription?.slice(0, 1200),
-  ].filter(Boolean);
-  return parts.join("\n");
-}
-
 function buildIntentPrompt(metadata: AppMetadata, listing?: ListingContent): string {
   const genres = metadata.genres?.length
     ? metadata.genres.join(", ")
@@ -46,6 +35,8 @@ function buildIntentPrompt(metadata: AppMetadata, listing?: ListingContent): str
     "Critical rules:",
     "- Distinguish product TYPE from store category. Example: YouTube is Photo & Video",
     "  on the App Store but competes with TikTok/Twitch/Netflix — NOT video editors like Splice/CapCut.",
+    "- Example: Spotify is Music — competitors are Apple Music/YouTube Music/Pandora, NOT Netflix or Disney+.",
+    "  Words like 'stream' or 'subscribe' in copy do NOT automatically mean video streaming.",
     "- searchTerms must be user-intent phrases (2–5 words), NOT genre names like 'Photo & Video'.",
     "- excludeTerms are words/phrases that appear in WRONG product types (e.g. 'video editor' for streaming).",
     "- competitorNames: 1–5 well-known direct rivals, BEST substitute first (e.g. TikTok before Netflix for YouTube).",
@@ -63,119 +54,8 @@ export function fallbackCompetitorSearchIntent(
   metadata: AppMetadata,
   listing?: ListingContent,
 ): CompetitorSearchIntent {
-  const blurb = listingBlurb(metadata, listing).toLowerCase();
-  const name = metadata.trackName.trim();
-  const isStreaming =
-    STREAMING_SIGNALS.test(blurb) && !EDITING_SIGNALS.test(blurb);
-  const isEditing = EDITING_SIGNALS.test(blurb) && !STREAMING_SIGNALS.test(blurb);
-  const isSocial =
-    /\b(social|friends|chat|message|share photos|stories|reels)\b/i.test(blurb) &&
-    !/\b(email|calendar|spreadsheet)\b/i.test(blurb);
-  const isAiChat =
-    /\b(ai assistant|chatgpt|llm|language model|gpt|copilot|chat bot)\b/i.test(blurb) ||
-    /\b(ai|assistant)\b/i.test(name);
-
-  if (/youtube/i.test(name) || isStreaming) {
-    return {
-      productCategory: "video streaming / consumption",
-      userIntentSummary: `Watch, stream, and discover video content — same job as ${name}.`,
-      searchTerms: [
-        "video streaming",
-        "watch videos online",
-        "short video app",
-        "live stream app",
-        `${name} alternative`,
-      ],
-      excludeTerms: [
-        "video editor",
-        "video editing",
-        "video maker",
-        "editor",
-        "capcut",
-        "splice",
-        "inshot",
-        "imovie",
-        "trim video",
-      ],
-      competitorNames: ["TikTok", "Twitch", "Instagram", "Netflix"],
-    };
-  }
-
-  if (isEditing) {
-    return {
-      productCategory: "video editing / creation",
-      userIntentSummary: `Edit and produce videos on mobile — same job as ${name}.`,
-      searchTerms: [
-        "video editor",
-        "edit videos",
-        "video maker",
-        `${name} alternative`,
-        "capcut",
-      ],
-      excludeTerms: [
-        "streaming",
-        "watch movies",
-        "live tv",
-        "netflix",
-        "video player only",
-      ],
-      competitorNames: ["CapCut", "InShot", "Splice", "iMovie"],
-    };
-  }
-
-  if (isAiChat) {
-    return {
-      productCategory: "AI chat assistant",
-      userIntentSummary: `AI-powered chat and assistant — same job as ${name}.`,
-      searchTerms: [
-        "AI chat assistant",
-        "AI assistant app",
-        `${name} alternative`,
-        "chatbot app",
-      ],
-      excludeTerms: [
-        "email",
-        "calendar",
-        "cloud storage",
-        "file manager",
-        "notes app",
-        "vpn",
-      ],
-      competitorNames: ["ChatGPT", "Claude", "Gemini", "Perplexity"],
-    };
-  }
-
-  if (isSocial) {
-    return {
-      productCategory: "social / sharing app",
-      userIntentSummary: `Connect and share with others — same job as ${name}.`,
-      searchTerms: [
-        "social media app",
-        "share photos videos",
-        `${name} alternative`,
-        "short video social",
-      ],
-      excludeTerms: [
-        "video editor",
-        "email client",
-        "password manager",
-        "weather",
-      ],
-      competitorNames: ["Instagram", "TikTok", "Snapchat", "X"],
-    };
-  }
-
-  return {
-    productCategory: metadata.primaryGenreName ?? "mobile app",
-    userIntentSummary: `Same core use case as ${name}.`,
-    searchTerms: [
-      name,
-      `${name} alternative`,
-      metadata.primaryGenreName ? `${metadata.primaryGenreName} app` : "popular app",
-    ].filter((t, i, a) => t && a.indexOf(t) === i),
-    excludeTerms: ["wallpaper", "ringtone", "guide for", "tips for"],
-    competitorNames: [name],
-  };
+  const arch = classifyProductArchetype(metadata, listing);
+  return intentFromArchetype(arch, metadata);
 }
 
 async function callIntentLlm(
@@ -261,8 +141,13 @@ export function isExcludedCompetitor(
   for (const raw of intent.excludeTerms) {
     const term = raw.toLowerCase().trim();
     if (term.length < 3) continue;
-    if (title.includes(term)) return true;
-    if (term.includes(" ") && body.includes(term)) return true;
+    if (term.includes(" ")) {
+      if (title.includes(term) || body.includes(term)) return true;
+    } else if (term.length >= 5) {
+      if (title.includes(term) || body.includes(term)) return true;
+    } else if (title.includes(term)) {
+      return true;
+    }
   }
   return false;
 }

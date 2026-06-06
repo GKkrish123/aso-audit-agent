@@ -34,6 +34,29 @@ const YOUTUBE: AppMetadata = {
     "Watch and subscribe to channels. Stream videos, music, and Shorts from creators worldwide.",
 };
 
+const SPOTIFY: AppMetadata = {
+  appId: "324684580",
+  storefront: "us",
+  trackName: "Spotify: Music and Podcasts",
+  artistName: "Spotify",
+  primaryGenreName: "Music",
+  primaryGenreId: "6011",
+  genreIds: ["6011"],
+  genres: ["Music"],
+  artworkUrl: "https://apps.apple.com/icon.png",
+  appStoreUrl: "https://apps.apple.com/us/app/spotify/id324684580",
+  averageUserRating: 4.8,
+  userRatingCount: 30_000_000,
+  price: 0,
+  currency: "USD",
+  contentAdvisoryRating: "12+",
+  releaseDate: "2008-09-07",
+  version: "1.0",
+  minimumOsVersion: "16.0",
+  itunesDescription:
+    "Stream millions of songs and podcasts. Discover new music, create playlists, and listen offline.",
+};
+
 describe("fallbackCompetitorSearchIntent", () => {
   it("targets streaming substitutes for YouTube, not video editors", () => {
     const intent = fallbackCompetitorSearchIntent(YOUTUBE);
@@ -53,6 +76,59 @@ describe("fallbackCompetitorSearchIntent", () => {
     expect(merged[0]).toMatch(/stream|watch|video/i);
     expect(merged.length).toBeGreaterThan(0);
   });
+
+  it("targets music streaming substitutes for Spotify, not video apps", () => {
+    const intent = fallbackCompetitorSearchIntent(SPOTIFY);
+    expect(intent.productCategory.toLowerCase()).toContain("music");
+    expect(intent.searchTerms.some((t) => /music|podcast|listen/i.test(t))).toBe(
+      true,
+    );
+    expect(intent.competitorNames.some((n) => /apple music|youtube music|pandora/i.test(n))).toBe(
+      true,
+    );
+    expect(intent.excludeTerms.some((t) => /netflix|disney|prime video/i.test(t))).toBe(
+      true,
+    );
+  });
+
+  it("classifies Duolingo as education, not generic", () => {
+    const intent = fallbackCompetitorSearchIntent({
+      ...SPOTIFY,
+      trackName: "Duolingo - Language Lessons",
+      primaryGenreName: "Education",
+      genres: ["Education"],
+      itunesDescription:
+        "Learn languages with bite-sized lessons, quizzes, and daily practice.",
+    });
+    expect(intent.productCategory.toLowerCase()).toContain("education");
+    expect(intent.competitorNames.some((n) => /babbel|khan/i.test(n))).toBe(true);
+  });
+
+  it("classifies DoorDash as food delivery, not ride hailing", () => {
+    const intent = fallbackCompetitorSearchIntent({
+      ...SPOTIFY,
+      trackName: "DoorDash - Food Delivery",
+      primaryGenreName: "Food & Drink",
+      genres: ["Food & Drink"],
+      itunesDescription:
+        "Order food delivery from restaurants near you. Track your order and menu.",
+    });
+    expect(intent.productCategory.toLowerCase()).toContain("food");
+    expect(intent.excludeTerms.some((t) => /ride share|taxi/i.test(t))).toBe(true);
+  });
+
+  it("classifies ChatGPT as AI assistant, not messaging", () => {
+    const intent = fallbackCompetitorSearchIntent({
+      ...SPOTIFY,
+      trackName: "ChatGPT",
+      primaryGenreName: "Productivity",
+      genres: ["Productivity"],
+      itunesDescription:
+        "AI assistant powered by GPT. Ask questions, get help writing, and chat with AI.",
+    });
+    expect(intent.productCategory.toLowerCase()).toContain("ai");
+    expect(intent.competitorNames.some((n) => /claude|gemini/i.test(n))).toBe(true);
+  });
 });
 
 describe("isExcludedCompetitor", () => {
@@ -68,6 +144,28 @@ describe("isExcludedCompetitor", () => {
       isExcludedCompetitor(intent, {
         trackName: "TikTok",
         description: "Watch and create short videos.",
+      }),
+    ).toBe(false);
+  });
+
+  it("excludes video streaming apps when intent targets music", () => {
+    const intent = fallbackCompetitorSearchIntent(SPOTIFY);
+    expect(
+      isExcludedCompetitor(intent, {
+        trackName: "Disney+",
+        description: "Stream movies and TV series from Disney.",
+      }),
+    ).toBe(true);
+    expect(
+      isExcludedCompetitor(intent, {
+        trackName: "Amazon Prime Video",
+        description: "Watch movies and TV shows.",
+      }),
+    ).toBe(true);
+    expect(
+      isExcludedCompetitor(intent, {
+        trackName: "Apple Music",
+        description: "Stream millions of songs ad-free.",
       }),
     ).toBe(false);
   });
@@ -95,6 +193,19 @@ describe("intentAlignmentScore", () => {
     expect(namedCompetitorRank(fallbackCompetitorSearchIntent(YOUTUBE), "TikTok")).toBe(
       0,
     );
+  });
+
+  it("scores Apple Music above Netflix for Spotify", () => {
+    const intent = fallbackCompetitorSearchIntent(SPOTIFY);
+    const appleMusic = intentAlignmentScore(intent, {
+      trackName: "Apple Music",
+      description: "Stream millions of songs and podcasts.",
+    });
+    const netflix = intentAlignmentScore(intent, {
+      trackName: "Netflix",
+      description: "Stream movies and TV shows.",
+    });
+    expect(appleMusic).toBeGreaterThan(netflix);
   });
 });
 
