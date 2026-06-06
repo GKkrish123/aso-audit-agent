@@ -44,7 +44,7 @@ export function MetadataConfirmCard({ metadata, pending, onConfirm, onReject }: 
       </CardHeader>
       <CardContent className="flex gap-4">
         <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-muted ring-1 ring-foreground/5">
-          {/* Apple artwork URLs are square; use unoptimized to skip Next image opt overhead */}
+          {}
           <Image
             src={metadata.artworkUrl}
             alt={`${metadata.trackName} icon`}

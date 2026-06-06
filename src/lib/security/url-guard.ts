@@ -1,4 +1,4 @@
-// SSRF guard: only Apple App Store hosts are allowed; never fetch arbitrary user URLs.
+
 const STOREFRONT_RE = /^[a-z]{2}$/i;
 const APP_ID_RE = /^id(\d{4,15})$/i;
 const HOST_ALLOWLIST = new Set([

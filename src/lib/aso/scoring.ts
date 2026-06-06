@@ -8,17 +8,6 @@ import {
   type ScoreComponent,
 } from "@/types/audit";
 
-/* ────────────────────────────────────────────────────────────────────────────
- * Apple App Store hard limits + product-research benchmarks (sources):
- *  - Title:      30 chars (hard cap)
- *  - Subtitle:   30 chars (hard cap, iOS 11+)
- *  - Keyword field: 100 chars, comma-separated, iOS-only, NOT publicly readable
- *  - Description: up to 4000 chars
- *  - Hook (above "more" fold): ~170 chars on iPhone
- *  - Screenshots: up to 10 per device class, ≥3 required, ≥6 recommended
- *  - App preview videos: up to 3, 15-30s each
- * ────────────────────────────────────────────────────────────────────────── */
-
 const TITLE_LIMIT = 30;
 const SUBTITLE_LIMIT = 30;
 const KEYWORD_FIELD_LIMIT = 100;
@@ -39,7 +28,6 @@ const WASTED_WORDS = new Set([
   "official",
 ]);
 
-/** CTA verbs that genuinely pull users into the listing (whitelist, not stuffed). */
 const CTA_VERBS = [
   "get",
   "try",
@@ -60,7 +48,6 @@ const CTA_VERBS = [
   "build",
 ] as const;
 
-/** Phrases that signal social proof. We capture the *matched literal* as evidence. */
 const SOCIAL_PROOF_PATTERNS: ReadonlyArray<RegExp> = [
   /\b\d{1,3}(?:[\s,])?(?:million|billion|m|b)\+?\s+(?:users?|downloads?|listeners?|customers?|members?)\b/i,
   /\b(?:trusted|loved|used)\s+by\s+\d/i,
@@ -77,12 +64,10 @@ function weighted(id: DimensionId, score10: number): number {
   return (DIMENSION_WEIGHTS[id] / 10) * score10;
 }
 
-/** Tokenize on word boundaries; lowercase; drop empties. Used by overlap rules. */
 function tokensOf(s: string): string[] {
   return s.toLowerCase().split(/[\W_]+/).filter(Boolean);
 }
 
-/** Stable short truncation for `observedValue` strings displayed in the UI. */
 function truncate(s: string, max = 220): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
@@ -98,7 +83,6 @@ function joinHint(
   return `${kept.join("; ")}.`;
 }
 
-/** Linear interpolated median; resilient to even/odd sample sizes. */
 function median(arr: readonly number[]): number {
   if (arr.length === 0) return 0;
   const sorted = [...arr].sort((a, b) => a - b);
@@ -108,11 +92,6 @@ function median(arr: readonly number[]): number {
     : sorted[mid];
 }
 
-/**
- * Mid-rank percentile of `value` within `sample`. Returns 0..1 where 1.0 = top
- * of distribution. Ties are split evenly (mid-rank), which keeps a 5-of-5 tie
- * at 0.5 rather than 1.0 — important for fairness when many peers share a rating.
- */
 function percentileOf(value: number, sample: readonly number[]): number {
   if (sample.length === 0) return 0.5;
   let below = 0;
@@ -124,7 +103,6 @@ function percentileOf(value: number, sample: readonly number[]): number {
   return (below + equal / 2) / sample.length;
 }
 
-/** log10 with floor at 1 — handles 0/negative counts gracefully. */
 function logCount(n: number): number {
   return Math.log10(Math.max(1, n));
 }
@@ -146,15 +124,6 @@ function applyComponents(baseline: number, components: ScoreComponent[]): number
   const raw = components.reduce((acc, c) => acc + c.contribution, baseline);
   return clamp(Math.round(raw * 10) / 10, 0, 10);
 }
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Per-dimension scorers. Each returns a Computed result with:
- *  - the literal observed value (proof)
- *  - the ordered components that built the score (proof trail)
- *  - a dynamic summary written with this app's numbers
- *  - an improvement hint when score < 9
- *  - confidence and source metadata
- * ────────────────────────────────────────────────────────────────────────── */
 
 function scoreTitle(listing: ListingContent): Computed {
   const title = listing.title.trim();
@@ -179,7 +148,6 @@ function scoreTitle(listing: ListingContent): Computed {
     };
   }
 
-  // Length grading — Apple caps at 30, sweet spot 20-30 for keyword room.
   let lengthBand: string;
   let lengthContribution: number;
   if (len > TITLE_LIMIT) {
@@ -205,11 +173,6 @@ function scoreTitle(listing: ListingContent): Computed {
     detail: title,
   });
 
-  /**
-   * Brand/keyword separator detection — must be surrounded by whitespace
-   * (or be a typographic dash) so we don't false-positive on compound
-   * words like "Wake-Up Light" or hyphenated brand names.
-   */
   const separatorMatch = title.match(
     /(?:\s[:|\-–—]\s|\s[:|]|[:|]\s|\s[—–]\s)/,
   );
@@ -222,7 +185,6 @@ function scoreTitle(listing: ListingContent): Computed {
     });
   }
 
-  // Wasted-word detection — tokenize first so "appendix" doesn't trigger "app".
   const wasted = tokensOf(title).filter((t) => WASTED_WORDS.has(t));
   if (wasted.length > 0) {
     components.push({
@@ -233,7 +195,6 @@ function scoreTitle(listing: ListingContent): Computed {
     });
   }
 
-  // Keyword-stuffing heuristic — too many distinct content tokens reads spammy.
   const contentTokens = tokensOf(title).filter((t) => t.length > 3 && !WASTED_WORDS.has(t));
   if (contentTokens.length >= 5) {
     components.push({
@@ -326,11 +287,6 @@ function scoreSubtitle(
     detail: subtitle,
   });
 
-  /**
-   * Title overlap — but exclude the brand-name tokens. Repeating "Spotify"
-   * across title + subtitle is normal brand reinforcement, NOT keyword
-   * waste; we only penalize *content* duplication.
-   */
   const brandTokens = new Set([
     ...tokensOf(metadata.artistName ?? "").filter((t) => t.length > 2),
     ...tokensOf(metadata.trackName).filter((t) => t.length > 4),
@@ -353,7 +309,6 @@ function scoreSubtitle(
     });
   }
 
-  // Wasted words in the subtitle waste even more than in the title (smaller field).
   const wasted = tokensOf(subtitle).filter((t) => WASTED_WORDS.has(t));
   if (wasted.length > 0) {
     components.push({
@@ -398,12 +353,7 @@ function scoreSubtitle(
 }
 
 function scoreKeywordField(listing: ListingContent): Computed {
-  /**
-   * The 100-char keyword field is iOS-only and not publicly readable through
-   * any official endpoint. We score *indirectly* by checking whether title +
-   * subtitle look like they were optimized assuming the keyword field exists
-   * (i.e. they don't dump every keyword into visible copy).
-   */
+
   const baseline = 5;
   const components: ScoreComponent[] = [];
   const title = listing.title.trim();
@@ -644,7 +594,7 @@ function scoreScreenshots(listing: ListingContent): Computed {
     observedValue: `${iphone} iPhone${ipad > 0 ? `, ${ipad} iPad` : ""}`,
     target,
     source: listing.sources.screenshots === "none" ? null : listing.sources.screenshots,
-    // Slot count is deterministic, but visual quality (copy, hierarchy) needs eyes.
+
     confidence: "needs_visual_review",
     summary: `${iphone}/${SCREENSHOT_TARGET_SLOTS} iPhone slots used${
       ipad > 0 ? `, ${ipad} iPad screenshot(s)` : ""
@@ -890,19 +840,6 @@ function scoreConversionSignals(listing: ListingContent): Computed {
   };
 }
 
-/**
- * Competitive Position — perfected, evidence-backed scoring.
- *
- * Compares the audited app to its peer set using:
- *   1. Rating percentile (mid-rank, robust to ties)
- *   2. Volume percentile (log-scaled — 1k vs 100M shouldn't be 100,000× weight)
- *   3. Peer-set quality (60% mean compositeScore + 40% chart-source share)
- *   4. Same-developer filter (a publisher's other apps are NOT real competition)
- *
- * Each signal is dampened by `confidenceDamp` so weak peer sets (few peers,
- * mostly term-search hits) can't dominate the score. Confidence flips to
- * "heuristic" unless we have ≥5 peers AND ≥0.5 peer-quality.
- */
 function scoreCompetitivePosition(
   meta: AppMetadata,
   competitors: Competitor[],
@@ -911,7 +848,6 @@ function scoreCompetitivePosition(
   const TARGET_TEXT =
     "Top quartile rating AND top quartile volume vs. genre peers (verified by ≥5 high-quality peers)";
 
-  // Step 1: filter same-developer apps out — they're not real competition.
   const selfDevKey = meta.artistName.trim().toLowerCase();
   const sameDevExcluded = competitors.filter(
     (c) => c.artistName.trim().toLowerCase() === selfDevKey,
@@ -952,7 +888,6 @@ function scoreCompetitivePosition(
     };
   }
 
-  // Step 2: peer-set quality — how trustworthy is this comparison?
   const chartPeers = peers.filter(
     (p) => p.source === "top-free-chart" || p.source === "top-grossing-chart",
   );
@@ -963,14 +898,9 @@ function scoreCompetitivePosition(
   const meanComposite = compositeScores.length
     ? compositeScores.reduce((a, b) => a + b, 0) / compositeScores.length
     : 0;
-  // 60% real-similarity / 40% chart-source weight — chart presence is the
-  // single strongest "this app actually competes in this category" signal.
+
   const peerQuality = clamp(0.6 * meanComposite + 0.4 * chartFraction, 0, 1);
 
-  // Dampening factor — ranges 0.4..1.0
-  //   - sampleSizeFactor reaches 1.0 at 10 peers
-  //   - peerQuality multiplier ranges 0.5..1.0
-  //   - floor at 0.4 so weak sets still register *some* signal
   const sampleSizeFactor = Math.min(1, peers.length / 10);
   const confidenceDamp = Math.max(
     0.4,
@@ -979,7 +909,6 @@ function scoreCompetitivePosition(
 
   const components: ScoreComponent[] = [];
 
-  // Step 3: rating percentile (±3 dampened)
   const myRating = meta.averageUserRating ?? 0;
   const ratedPeers = peers
     .map((p) => p.averageUserRating)
@@ -992,7 +921,7 @@ function scoreCompetitivePosition(
     const sample = [...ratedPeers, myRating];
     const pct = percentileOf(myRating, sample);
     ratingPctText = `${Math.round(pct * 100)}%`;
-    // Rank position (1 = best). Use descending sort + last-tie position for fairness.
+
     const sortedDesc = [...sample].sort((a, b) => b - a);
     const rank = sortedDesc.findIndex((v) => v <= myRating) + 1;
     ratingRankText = `${rank}/${sample.length}`;
@@ -1025,7 +954,6 @@ function scoreCompetitivePosition(
     });
   }
 
-  // Step 4: volume percentile (±2.5 dampened, log-scaled)
   const myCount = meta.userRatingCount ?? 0;
   const countPeers = peers
     .map((p) => p.userRatingCount)
@@ -1055,8 +983,6 @@ function scoreCompetitivePosition(
     });
   }
 
-  // Step 5: peer-set quality bonus (0..+1, positive only — recognizes a strong
-  // comparison set without penalizing the app for a weak scan)
   if (peerQuality > 0) {
     components.push({
       label: `Peer set quality ${Math.round(peerQuality * 100)}%`,
@@ -1068,7 +994,6 @@ function scoreCompetitivePosition(
     });
   }
 
-  // Step 6: same-developer exclusion note — pure transparency, 0 contribution.
   if (sameDevExcluded.length > 0) {
     components.push({
       label: `Excluded ${sameDevExcluded.length} same-developer app(s) from peer set`,
@@ -1096,7 +1021,6 @@ function scoreCompetitivePosition(
               ? "Below peer median"
               : "Trailing peers significantly";
 
-  // Dynamic confidence — only call it "deterministic" with a real sample.
   const confidence: NonNullable<DimensionScore["confidence"]> =
     peers.length >= 5 && peerQuality >= 0.5 ? "deterministic" : "heuristic";
 
@@ -1151,8 +1075,6 @@ function scoreCompetitivePosition(
     ),
   };
 }
-
-/* ────────────────────────────────────────────────────────────────────────── */
 
 export function computeBaselineScores(input: {
   metadata: AppMetadata;

@@ -22,7 +22,7 @@ interface SnapshotShape {
     report?: unknown;
     warnings?: unknown;
   };
-  /** Map of stepId -> step result. Successful steps have `output`; suspended steps have `suspendOutput`. */
+
   steps?: Record<
     string,
     {
@@ -33,7 +33,7 @@ interface SnapshotShape {
       payload?: unknown;
     }
   >;
-  /** Snapshot of the workflow state (i.e. `setState` payloads). */
+
   initialState?: { metadata?: unknown; parsed?: unknown; warnings?: unknown };
   error?: { message?: string } | string;
   payload?: { url?: string };
@@ -200,9 +200,9 @@ function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
   if (raw === "cancelled" || raw === "canceled") return "cancelled";
 
   const auditStep = snapshot.steps?.["run-audit"];
-  if (auditStep?.status === "running" || auditStep?.status === "success") {
-    return "running_audit";
-  }
+  if (auditStep?.status === "failed") return "failed";
+  if (auditStep?.status === "success") return "completed";
+  if (auditStep?.status === "running") return "running_audit";
 
   if (isAwaitingConfirmation(snapshot)) return "awaiting_confirmation";
   if (hasPassedConfirmationGate(snapshot)) return "running_audit";
@@ -296,12 +296,12 @@ async function ensureSchema(): Promise<void> {
     try {
       await db.execute("ALTER TABLE chat_sessions ADD COLUMN archived_at INTEGER");
     } catch {
-      // Column already exists on upgraded databases.
+
     }
     try {
       await db.execute("ALTER TABLE audit_jobs ADD COLUMN confirmed_at INTEGER");
     } catch {
-      // Column already exists on upgraded databases.
+
     }
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at DESC)",
@@ -316,7 +316,7 @@ async function ensureSchema(): Promise<void> {
   try {
     await schemaReady;
   } catch (err) {
-    // Allow retry on next request if migration fails once.
+
     schemaReady = undefined;
     throw err;
   }
@@ -594,9 +594,6 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
 
   logger.info({ jobId, chatId: input.chatId, runId: run.runId }, "audit job created");
 
-  // Start the workflow but don't await the full result — it suspends at
-  // await-confirmation. Keep this request alive until the suspend snapshot is
-  // persisted so Vercel/serverless doesn't return before the gate is saved.
   const startStartedAt = performance.now();
   run
     .start({ inputData: { url: input.url } })
@@ -643,8 +640,7 @@ async function waitForConfirmationGate(jobId: string): Promise<AuditJob> {
       );
       return job;
     }
-    // Do not return on running_audit — that was a mis-inference while fetch
-    // finished but the workflow was still reaching the suspend gate.
+
     await new Promise((r) => setTimeout(r, 200));
   }
   const job = await getAuditJob(jobId);
@@ -689,18 +685,6 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
   };
 }
 
-/**
- * Wait for the workflow snapshot to leave `awaiting_confirmation` after a
- * resume has been kicked off. Returns the moment the transition is observed,
- * or after `maxMs` if Mastra hasn't written the transitional snapshot yet.
- *
- * This is intentionally a SHORT wait (default 5s) — it exists only to give
- * Mastra's snapshot writer enough time to flush the `await-confirmation:
- * success` / `run-audit: running` transition before we respond. The original
- * 30s `waitForAuditRunning` ate the function budget for no real benefit; 5s
- * is enough in practice and trivial relative to the 300s confirm-route
- * `maxDuration` on Vercel Pro.
- */
 async function waitForResumeToProgress(
   jobId: string,
   maxMs = 5_000,
@@ -717,33 +701,6 @@ async function waitForResumeToProgress(
   return job;
 }
 
-/**
- * Resume the workflow with the user's confirmation.
- *
- * On `confirmed=true` the workflow advances into `run-audit` and the audit
- * is considered "started" — the chat becomes locked to this job. The actual
- * audit work runs in a background `after()` callback so the HTTP response
- * returns quickly; the UI then polls /api/audit/:jobId for status until
- * `completed` or `failed`.
- *
- * On `confirmed=false` the user rejected the metadata match BEFORE the audit
- * actually started. We release the chat by deleting the job binding so the
- * user can paste a different URL into the same chat. The Mastra workflow is
- * still resumed (with confirmed=false) so its snapshot transitions out of
- * the suspended state cleanly instead of leaking. Returns `null` to signal
- * the binding has been released.
- *
- * Response semantics for confirmed=true:
- *  1. Fire `run.resume()` (background, awaited inside `after()`).
- *  2. Wait briefly (≤5s) for the snapshot to transition off
- *     `awaiting_confirmation`. This avoids handing the client a stale
- *     "awaiting_confirmation" job that would cancel the optimistic UI update
- *     and stop polling (since the UI excludes that status from its polling
- *     allowlist — see `shouldPollJobStatus` in audit-chat.tsx).
- *  3. If the snapshot still hasn't progressed after the wait window, synthesize
- *     a `running_audit` status in the response (we KNOW resume was fired and
- *     accepted). The next poll will see the real snapshot.
- */
 export async function confirmAuditJob(
   jobId: string,
   confirmed: boolean,

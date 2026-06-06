@@ -104,7 +104,6 @@ Free · In‑App Purchases
 
 - [Developer\\\\\n\\\\\nSnap, Inc.](https://apps.apple.com/us/developer/snap-inc/id446889612?platform=iphone)
 
-
 - ![](https://apps.apple.com/assets/artwork/1x1.gif)
 
 iPhone, iPad, Apple Watch, iMessage

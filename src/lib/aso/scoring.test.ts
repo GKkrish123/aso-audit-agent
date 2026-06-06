@@ -116,8 +116,6 @@ describe("computeBaselineScores", () => {
   });
 });
 
-/* ────────── New: structured-proof guarantees ────────── */
-
 describe("structured proof trail", () => {
   it("emits an observedValue for each scored field", () => {
     const out = computeBaselineScores({
@@ -145,7 +143,7 @@ describe("structured proof trail", () => {
       const expected =
         (d.baseline ?? 0) +
         components.reduce((acc, c) => acc + c.contribution, 0);
-      // Engine clamps to [0,10] and rounds to 1 decimal — verify within that tolerance.
+
       const clamped = Math.max(0, Math.min(10, expected));
       expect(d.score).toBeCloseTo(Math.round(clamped * 10) / 10, 1);
     }
@@ -183,8 +181,6 @@ describe("structured proof trail", () => {
     expect(title.summary).toContain(String(baseListing.title.length));
   });
 });
-
-/* ────────── New: rule correctness fixes ────────── */
 
 describe("scoring rule fixes", () => {
   it("does NOT flag a hyphenated brand name as a separator", () => {

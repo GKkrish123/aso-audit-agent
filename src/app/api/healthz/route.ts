@@ -6,12 +6,6 @@ import { getEnv } from "@/lib/env";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * Mask the leftmost portion of an opaque secret so it's safe to surface in
- * health responses while still letting an operator confirm "yes, the right
- * key is set". Returns null for falsy input so the field stays absent
- * instead of leaking the literal string "null".
- */
 function maskTail(value: string | undefined): string | null {
   if (!value) return null;
   if (value.length <= 8) return "***";

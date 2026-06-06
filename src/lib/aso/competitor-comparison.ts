@@ -4,23 +4,6 @@ import type {
   CompetitorComparisonRow,
 } from "@/types/audit";
 
-/**
- * Build the Competitor Comparison rows for the audit report.
- *
- * 100% deterministic — every value (rating delta, volume ratio, strengths,
- * weaknesses, notes, source pill) is derived directly from iTunes payload +
- * the competitor scanner's metadata. No LLM is asked to fabricate numbers,
- * so the rendered table is guaranteed accurate and survives an LLM outage.
- *
- * Decisions encoded:
- *  - Same-developer apps in the input are dropped (they aren't real competition).
- *  - Sort order mirrors the scanner's composite ranking; we tie-break on volume.
- *  - Deltas use absolute thresholds (rating Δ ≥ 0.05★, volume ratio ≥ 1.5×)
- *    so the strengths/weaknesses pills only fire for *material* differences,
- *    not statistical noise.
- *  - `notes` is a single human-readable one-liner that the UI can show as
- *    fine print without further formatting.
- */
 export function buildCompetitorComparison(
   meta: AppMetadata,
   competitors: readonly Competitor[],
@@ -35,7 +18,6 @@ export function buildCompetitorComparison(
     .filter((c) => c.artistName.trim().toLowerCase() !== myArtist)
     .map((c) => toRow(c, myRating, myCount));
 
-  // Stable order: composite similarity (highest first), then volume.
   rows.sort((a, b) => {
     const aSim = a.compositeSimilarity ?? a.keywordOverlap;
     const bSim = b.compositeSimilarity ?? b.keywordOverlap;
@@ -63,35 +45,33 @@ function toRow(
   const strengths: string[] = [];
   const weaknesses: string[] = [];
 
-  // Rating comparison (threshold 0.05★ avoids noise from rounding).
   if (ratingDelta !== null && Math.abs(ratingDelta) >= 0.05) {
     if (ratingDelta < 0) {
-      // they beat me
+
       strengths.push(
         `Higher rating (${formatRating(c.averageUserRating)}★ vs ${formatRating(myRating)}★ — Δ ${ratingDelta.toFixed(2)})`,
       );
     } else {
-      // I beat them
+
       weaknesses.push(
         `Lower rating (${formatRating(c.averageUserRating)}★ vs ${formatRating(myRating)}★ — Δ +${ratingDelta.toFixed(2)})`,
       );
     }
   } else if (ratingDelta !== null) {
-    // Within 0.05 — call out parity explicitly.
+
     weaknesses.push(
       `Rating at parity (${formatRating(c.averageUserRating)}★ vs ${formatRating(myRating)}★)`,
     );
   }
 
-  // Volume comparison (threshold 1.5×).
   if (ratingCountRatio !== null) {
     if (ratingCountRatio >= 1.5) {
-      // I'm bigger
+
       weaknesses.push(
         `Smaller audience (${formatCount(c.userRatingCount)} ratings — ${ratingCountRatio.toFixed(2)}× smaller than you)`,
       );
     } else if (ratingCountRatio > 0 && ratingCountRatio <= 1 / 1.5) {
-      // They're bigger
+
       const flipped = roundTo(1 / ratingCountRatio, 2);
       strengths.push(
         `Larger audience (${formatCount(c.userRatingCount)} ratings — ${flipped.toFixed(2)}× more than you)`,
@@ -103,7 +83,6 @@ function toRow(
     );
   }
 
-  // Chart presence is the strongest "real category competitor" signal we have.
   if (
     c.chartRank !== undefined &&
     (c.source === "top-free-chart" || c.source === "top-grossing-chart")
@@ -116,8 +95,6 @@ function toRow(
     strengths.push(`Top ${c.chartRank} in ${where}`);
   }
 
-  // Keyword overlap as a strength only when notably high (≥40% — Jaccard is
-  // strict; 40%+ means the listings share major terminology).
   if (c.overlapScore >= 0.4) {
     strengths.push(
       `Targets the same keywords (${pct(c.overlapScore)} listing overlap)`,
@@ -147,12 +124,6 @@ function toRow(
   };
 }
 
-/**
- * One-line human-readable summary suitable for fine print under the card.
- * Always non-empty so the UI can show it without further checks.
- *
- * Format: `<source-tag> • <volume> ratings @ <rating>★ • <vs-you-clause>`
- */
 function buildNotes(
   c: Competitor,
   ratingDelta: number | null,

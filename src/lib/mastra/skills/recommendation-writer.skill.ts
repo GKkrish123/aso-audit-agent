@@ -32,13 +32,6 @@ class LlmTimeoutError extends Error {
   }
 }
 
-/**
- * Mastra wraps the real underlying error in a `MastraError` whose `text` is
- * the user-facing message (e.g. "Failed to resolve model configuration") and
- * stashes the real cause in `details.originalError` and/or `cause`. We dig it
- * out and rewrite the message into something a caller can actually act on -
- * surfacing the missing env var / unknown model id directly.
- */
 function translateAgentError(err: unknown): Error {
   const e = err as {
     message?: string;
@@ -72,20 +65,9 @@ function translateAgentError(err: unknown): Error {
       : new Error(top);
 }
 
-/**
- * The agent's structured output. NOTE: `competitorComparison` is intentionally
- * NOT in this schema — the comparison table is built deterministically by
- * `buildCompetitorComparison()` in the workflow so the rendered numbers are
- * guaranteed accurate (no LLM hallucination of ratings/counts) and so the
- * table survives an LLM outage. The LLM is asked only to refine scores and
- * write recommendations grounded in the deterministic data we pass in.
- */
 const AgentOutputSchema = z.object({
   refinedDimensionScores: z.array(DimensionScoreSchema).optional(),
-  // Framework requires 3-5 recs per severity bucket (9-15 total). We allow
-  // slightly more slack at the schema layer (>=3 total) and enforce the
-  // per-bucket minimum at the application layer so we can surface a useful
-  // warning instead of hard-failing the whole report.
+
   recommendations: z.array(RecommendationSchema).min(3).max(20),
   warnings: z.array(z.string()).default([]),
 });
@@ -98,12 +80,7 @@ export interface RecommendationWriterInput {
   metadata: AppMetadata;
   listing: ListingContent;
   competitors: Competitor[];
-  /**
-   * Deterministically built comparison rows from `buildCompetitorComparison`.
-   * Passed straight through to the final report — the LLM never gets to edit
-   * the numbers. Also handed to the LLM in the prompt as grounding evidence
-   * for the recommendations it writes.
-   */
+
   competitorComparison: CompetitorComparisonRow[];
   baselineScores: DimensionScore[];
   baselineOverallScore: number;
@@ -178,11 +155,6 @@ export const recommendationWriterSkill = {
     const timeoutMs = env.LLM_TIMEOUT_MS;
     const model = env.PRIMARY_MODEL;
 
-    // Hard per-call timeout via AbortSignal. Without this, a hung provider
-    // (NIM, OpenRouter outage, Anthropic 5xx) will sit indefinitely and the
-    // surrounding Vercel function gets killed at maxDuration with the workflow
-    // snapshot stuck mid-step. Aborting cleanly bubbles into translateAgentError
-    // so the job's `error` field surfaces an actionable message.
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const startedAt = performance.now();
@@ -254,15 +226,6 @@ export const recommendationWriterSkill = {
 
     const parsed = AgentOutputSchema.parse(result.object);
 
-    /**
-     * Overlay LLM refinements ON TOP of the deterministic baseline rather than
-     * replacing it. The deterministic engine owns the structured proof trail
-     * (`components`, `observedValue`, `target`, `source`, `confidence`,
-     * `improvementHint`); the LLM is allowed to refine the score, augment
-     * the summary, and append narrative evidence — but it cannot strip the
-     * proof that backs the score. Without this overlay a refined score would
-     * land in the UI as a number with no scoring breakdown.
-     */
     const refinedById = new Map(
       (parsed.refinedDimensionScores ?? []).map((d) => [d.id, d] as const),
     );
@@ -278,8 +241,7 @@ export const recommendationWriterSkill = {
         weightedScore: Math.round(((score * weight) / 10) * 100) / 100,
         summary: refined.summary?.trim() ? refined.summary : baseline.summary,
         evidence: [...(baseline.evidence ?? []), ...(refined.evidence ?? [])],
-        // LLM-supplied structured fields are accepted only when non-empty;
-        // missing ones fall back to the deterministic value.
+
         improvementHint:
           refined.improvementHint && refined.improvementHint.trim().length > 0
             ? refined.improvementHint
@@ -291,16 +253,10 @@ export const recommendationWriterSkill = {
       dimensionScores.reduce((acc, s) => acc + s.weightedScore, 0),
     );
 
-    // Post-process every recommendation through the deterministic enricher so
-    // ALL recs have category / metric / expectedImpact / effort / location
-    // populated — derived from the baseline score's observedValue/target/
-    // improvementHint when the LLM omits them. The UI can then render the
-    // proof block unconditionally.
     const enrichedRecs = parsed.recommendations.map((r) =>
       enrichRecommendation(r, dimensionScores),
     );
 
-    // Sort within each bucket by weighted impact (highest leverage first).
     const buckets = {
       quickWin: sortByImpact(enrichedRecs.filter((r) => r.severity === "quickWin")),
       highImpact: sortByImpact(enrichedRecs.filter((r) => r.severity === "highImpact")),
@@ -318,8 +274,6 @@ export const recommendationWriterSkill = {
       }
     }
 
-    // Flatten back in bucket order (quickWin → highImpact → strategic) so the
-    // recommendations array consumers iterate in priority order.
     const orderedRecs = [
       ...buckets.quickWin,
       ...buckets.highImpact,
@@ -330,8 +284,7 @@ export const recommendationWriterSkill = {
       overallScore: Math.max(0, Math.min(100, overallScore)),
       dimensionScores,
       recommendations: orderedRecs,
-      // Comparison rows come from the deterministic builder; the LLM never
-      // edits them, eliminating any chance of hallucinated ratings/counts.
+
       competitorComparison: input.competitorComparison,
       warnings: [...bucketWarnings, ...parsed.warnings],
     };

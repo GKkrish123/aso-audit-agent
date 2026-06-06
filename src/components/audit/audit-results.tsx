@@ -151,7 +151,7 @@ function flattenMedia(media: AuditMedia): MediaItem[] {
 }
 
 function isHttpUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value.trim());
+  return /^https?:\/\//i.test(value);
 }
 
 function findMediaIndexByUrl(url: string, items: MediaItem[]): number | null {

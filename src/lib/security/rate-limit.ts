@@ -1,4 +1,4 @@
-// In-memory token bucket; sufficient for single-instance. Swap store for Redis in multi-instance.
+
 import { LRUCache } from "lru-cache";
 import { getEnv } from "../env";
 
@@ -23,7 +23,7 @@ class RateLimiter {
     this.refillPerMs = opts.rpm / 60_000;
     this.buckets = new LRUCache<string, Bucket>({
       max: 10_000,
-      ttl: 1000 * 60 * 60, // 1h idle eviction
+      ttl: 1000 * 60 * 60,
     });
   }
 
@@ -66,7 +66,6 @@ export function consumeRateLimit(key: string, cost = 1): RateLimitResult {
   return get().consume(key, cost);
 }
 
-// Prefers forwarded IP; falls back to a stable anonymous bucket for local clients.
 export function clientKeyFromRequest(req: Request): string {
   const fwd =
     req.headers.get("x-forwarded-for") ??

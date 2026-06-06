@@ -12,11 +12,7 @@ import { nanoid } from "nanoid";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/**
- * 60s is enough for: parse URL + 1 iTunes lookup + suspend the workflow at the
- * confirmation gate. The much longer-running audit step uses the confirm
- * route's budget (see /api/audit/[jobId]/confirm).
- */
+
 export const maxDuration = 60;
 
 const BodySchema = z.object({ url: z.string().min(1), chatId: z.string().min(1) });

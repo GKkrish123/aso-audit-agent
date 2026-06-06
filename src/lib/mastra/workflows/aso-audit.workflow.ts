@@ -44,10 +44,6 @@ const ConfirmationState = z.object({
   warnings: z.array(z.string()).default([]),
 });
 
-/**
- * Wrap an async hop with structured entry/exit logs so production deploys can
- * pinpoint which step is slow / stuck. Emits `{ phase, hop, durationMs, ok }`.
- */
 async function timedHop<T>(
   hop: string,
   fields: Record<string, unknown>,
@@ -171,27 +167,28 @@ const runAuditStep = createStep({
 
     return await metrics.time("workflow.run_audit", async () => {
       return await timedHop("workflow.run_audit", { appId }, async () => {
-        // Listing fetch + competitor scan are independent network-bound hops.
-        // Running them in parallel saves the slower of the two on every audit
-        // (typically 4-15s, can be more if Firecrawl or one of the iTunes
-        // searches retries). Promise.all preserves error propagation - if
-        // either rejects the whole audit fails fast.
-        const [listing, competitorResult] = await Promise.all([
-          timedHop(
-            "tool.fetch_listing_content",
-            { appId, canonicalUrl: inputData.parsed.canonicalUrl },
-            async () =>
-              runFetchListingContent({
-                appId: inputData.parsed.appId,
-                storefront: inputData.parsed.storefront,
-                canonicalUrl: inputData.parsed.canonicalUrl,
-                metadata: inputData.metadata,
-              }),
-          ),
-          timedHop("tool.competitor_scan", { appId }, async () =>
-            runCompetitorScan({ metadata: inputData.metadata }),
-          ),
-        ]);
+
+        const listing = await timedHop(
+          "tool.fetch_listing_content",
+          { appId, canonicalUrl: inputData.parsed.canonicalUrl },
+          async () =>
+            runFetchListingContent({
+              appId: inputData.parsed.appId,
+              storefront: inputData.parsed.storefront,
+              canonicalUrl: inputData.parsed.canonicalUrl,
+              metadata: inputData.metadata,
+            }),
+        );
+
+        const competitorResult = await timedHop(
+          "tool.competitor_scan",
+          { appId },
+          async () =>
+            runCompetitorScan({
+              metadata: inputData.metadata,
+              listing,
+            }),
+        );
 
         if (listing.sources.longText === "none") {
           warnings.push(
@@ -236,10 +233,6 @@ const runAuditStep = createStep({
           throw new Error("Mastra instance not available in workflow context");
         }
 
-        // Build the competitor-comparison table deterministically (numbers,
-        // deltas, strengths, weaknesses) so the rendered table is guaranteed
-        // accurate and survives an LLM outage. The LLM only writes the
-        // recommendations + optional score refinements.
         const competitorComparison = buildCompetitorComparison(
           inputData.metadata,
           competitors,

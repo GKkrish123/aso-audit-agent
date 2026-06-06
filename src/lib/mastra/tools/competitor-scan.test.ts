@@ -212,7 +212,7 @@ describe("runCompetitorScan", () => {
           feed: {
             entry: [
               {
-                id: { attributes: { "im:id": "447188370" } }, // target itself
+                id: { attributes: { "im:id": "447188370" } },
                 "im:name": { label: "Snapchat" },
                 "im:artist": { label: "Snap, Inc." },
                 category: {
@@ -220,7 +220,7 @@ describe("runCompetitorScan", () => {
                 },
               },
               {
-                id: { attributes: { "im:id": "1111" } }, // good competitor
+                id: { attributes: { "im:id": "1111" } },
                 "im:name": { label: "Instagram" },
                 "im:artist": { label: "Instagram, Inc." },
                 category: {
@@ -228,7 +228,7 @@ describe("runCompetitorScan", () => {
                 },
               },
               {
-                id: { attributes: { "im:id": "2222" } }, // same developer - drop
+                id: { attributes: { "im:id": "2222" } },
                 "im:name": { label: "Bitmoji" },
                 "im:artist": { label: "Snap, Inc." },
                 category: {
@@ -244,7 +244,7 @@ describe("runCompetitorScan", () => {
           feed: {
             entry: [
               {
-                id: { attributes: { "im:id": "3333" } }, // top-grossing peer
+                id: { attributes: { "im:id": "3333" } },
                 "im:name": { label: "TikTok" },
                 "im:artist": { label: "ByteDance" },
                 category: {
@@ -310,7 +310,7 @@ describe("runCompetitorScan", () => {
                 "BeReal. Share the moment in a fast, authentic photo each day.",
             },
             {
-              trackId: 5555, // low ratings - should be filtered
+              trackId: 5555,
               trackName: "TinyCam",
               artistName: "Indie Dev",
               primaryGenreName: "Photo & Video",
@@ -327,9 +327,9 @@ describe("runCompetitorScan", () => {
     const result = await runCompetitorScan({ metadata: TARGET, listing: LISTING });
 
     const ids = result.competitors.map((c) => c.appId);
-    expect(ids).not.toContain("447188370"); // target excluded
-    expect(ids).not.toContain("2222"); // same developer excluded
-    expect(ids).not.toContain("5555"); // <50 ratings excluded
+    expect(ids).not.toContain("447188370");
+    expect(ids).not.toContain("2222");
+    expect(ids).not.toContain("5555");
     expect(ids.length).toBeGreaterThan(0);
     expect(ids.length).toBeLessThanOrEqual(3);
 
@@ -471,6 +471,97 @@ describe("runCompetitorScan", () => {
     for (const c of result.competitors) {
       expect(c.overlapScore).toBeGreaterThanOrEqual(0.06);
     }
+  });
+
+  it("excludes video editors for streaming apps (YouTube)", async () => {
+    const YOUTUBE: AppMetadata = {
+      ...TARGET,
+      appId: "544007664",
+      trackName: "YouTube",
+      artistName: "Google",
+      primaryGenreName: "Photo & Video",
+      primaryGenreId: "6008",
+      genres: ["Photo & Video"],
+      itunesDescription:
+        "Watch and subscribe to channels. Stream videos, music, and Shorts.",
+    };
+    const YOUTUBE_LISTING: ListingContent = {
+      title: "YouTube",
+      subtitle: "Videos, Music and Live Streams",
+      description:
+        "Watch videos, stream music, discover Shorts, and subscribe to creators.",
+      releaseNotes: null,
+      promotionalText: null,
+      screenshotUrls: [],
+      ipadScreenshotUrls: [],
+      hasAppPreviewVideo: false,
+      appPreviewVideoUrls: [],
+      sources: { metadata: "itunes", longText: "firecrawl", screenshots: "none" },
+    };
+
+    globalThis.fetch = makeFetchStub({
+      "/rss/topfreeapplications": {
+        jsonValue: {
+          feed: {
+            entry: [
+              {
+                id: { attributes: { "im:id": "544007664" } },
+                "im:name": { label: "YouTube" },
+                "im:artist": { label: "Google" },
+                category: { attributes: { "im:id": "6008", label: "Photo & Video" } },
+              },
+              {
+                id: { attributes: { "im:id": "8001" } },
+                "im:name": { label: "Splice - Video Editor & Maker" },
+                "im:artist": { label: "Bending Spoons" },
+                category: { attributes: { "im:id": "6008", label: "Photo & Video" } },
+              },
+              {
+                id: { attributes: { "im:id": "8002" } },
+                "im:name": { label: "TikTok" },
+                "im:artist": { label: "ByteDance" },
+                category: { attributes: { "im:id": "6016", label: "Entertainment" } },
+              },
+            ],
+          },
+        },
+      },
+      "/rss/topgrossingapplications": { jsonValue: { feed: { entry: [] } } },
+      "/lookup?id=": {
+        jsonValue: {
+          results: [
+            {
+              trackId: 8001,
+              trackName: "Splice - Video Editor & Maker",
+              artistName: "Bending Spoons",
+              primaryGenreName: "Photo & Video",
+              description: "Edit videos like a pro with our video editor.",
+              averageUserRating: 4.6,
+              userRatingCount: 200_000,
+            },
+            {
+              trackId: 8002,
+              trackName: "TikTok",
+              artistName: "ByteDance",
+              primaryGenreName: "Entertainment",
+              description: "Watch and create short videos. Stream trending content.",
+              averageUserRating: 4.8,
+              userRatingCount: 20_000_000,
+            },
+          ],
+        },
+      },
+      "/search?": { jsonValue: { results: [] } },
+    });
+
+    const result = await runCompetitorScan({
+      metadata: YOUTUBE,
+      listing: YOUTUBE_LISTING,
+    });
+
+    const names = result.competitors.map((c) => c.trackName);
+    expect(names.some((n) => /splice/i.test(n))).toBe(false);
+    expect(names.some((n) => /tiktok/i.test(n))).toBe(true);
   });
 
   it("falls back to the US storefront when target storefront is empty", async () => {

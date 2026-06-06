@@ -16,7 +16,7 @@ interface ITunesResult {
   primaryGenreName?: string;
   primaryGenreId?: number;
   genres?: string[];
-  /** Same order as `genres`. */
+
   genreIds?: string[];
   artworkUrl512?: string;
   artworkUrl100?: string;
@@ -29,9 +29,7 @@ interface ITunesResult {
   releaseDate?: string;
   version?: string;
   minimumOsVersion?: string;
-  // Listing-ish fields the iTunes Lookup endpoint also returns. We pass these
-  // through into AppMetadata so the listing tool always has a reliable
-  // baseline even when Firecrawl + HTML extraction both degrade.
+
   description?: string;
   releaseNotes?: string;
   screenshotUrls?: string[];
@@ -110,8 +108,7 @@ export async function runFetchAppMetadata(input: {
     artistName: result.artistName ?? "(unknown developer)",
     bundleId: result.bundleId,
     primaryGenreName: result.primaryGenreName,
-    // iTunes returns primaryGenreId as a number and genreIds as string[].
-    // Normalize both to string for downstream consumers (competitor scan).
+
     primaryGenreId:
       typeof result.primaryGenreId === "number"
         ? String(result.primaryGenreId)

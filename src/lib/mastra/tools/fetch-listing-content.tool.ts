@@ -59,11 +59,7 @@ async function fetchFirecrawl(
       },
       body: JSON.stringify({
         url,
-        // Request BOTH formats. The serialized-server-data JSON blob (only
-        // available in the HTML response) is the only source of truth for
-        // screenshots and preview videos on the modern Svelte-rendered App
-        // Store page. Markdown remains useful as a fallback when the HTML
-        // is too sanitized or the blob is missing.
+
         formats: ["markdown", "html"],
         onlyMainContent: false,
         maxAge: 172800000,
@@ -83,12 +79,6 @@ async function fetchFirecrawl(
     };
     if (!json?.data) return undefined;
 
-    // Strategy: HTML extraction (serialized-data + cheerio overlay) is the
-    // richest source — it returns title, subtitle, description, what's new,
-    // every screenshot, AND preview videos. Markdown is only a degraded
-    // fallback (no media, no subtitle reliably). Overlay markdown on top of
-    // HTML only for fields the HTML didn't have, so we never lose media to
-    // the markdown's 1x1.gif placeholders.
     const fromHtml = json.data.html
       ? extractFromAppStoreHtml(json.data.html)
       : undefined;
@@ -96,8 +86,7 @@ async function fetchFirecrawl(
       ? extractFromAppStoreMarkdown(json.data.markdown, json.data.metadata)
       : undefined;
     if (fromHtml && fromMd) {
-      // HTML wins for media + structured fields; markdown only fills
-      // promotionalText (which the JSON blob doesn't carry separately).
+
       return {
         ...fromHtml,
         promotionalText: fromHtml.promotionalText ?? fromMd.promotionalText,
@@ -119,8 +108,6 @@ export async function runFetchListingContent(input: {
   const logger = getLogger();
   const metrics = getMetrics();
 
-  // Firecrawl markdown returns 1x1.gif placeholder screenshots, so iTunes is
-  // the only reliable screenshot source through this pipeline.
   const itunesListing: ExtractedListing = {
     title: input.metadata.trackName,
     description: input.metadata.itunesDescription ?? undefined,
@@ -234,12 +221,6 @@ export async function runFetchListingContent(input: {
 
   const merged = mergeListingSources(itunesListing, htmlListing, firecrawlListing);
 
-  // Source attribution must mirror the merge precedence in
-  // mergeListingSources: html > firecrawl > itunes for long text & media.
-  // Both Firecrawl and direct HTML hit the same serialized-server-data blob
-  // (Apple's modern Svelte page), so screenshots from either are equally
-  // real — the old "firecrawl returns placeholders" caveat no longer applies
-  // once we parse the serialized JSON.
   const longTextSource: ListingContent["sources"]["longText"] = merged.description
     ? htmlListing.description
       ? "html"

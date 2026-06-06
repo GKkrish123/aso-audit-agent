@@ -55,9 +55,6 @@ export function assertModelConfigured(env: Env = getEnv()): void {
   }
 }
 
-// Mastra strips the provider prefix before calling upstream APIs. Custom OpenAI-compatible
-// endpoints (NVIDIA NIM, vLLM, LM Studio) often expect the full vendor-prefixed id, so we
-// prepend `custom/` which Mastra removes, leaving the original id unchanged.
 function preserveCustomModelId(rawId: string): string {
   if (rawId.startsWith("custom/")) return rawId;
   return `custom/${rawId}`;
@@ -83,7 +80,6 @@ function buildFallbackEntries(env: Env): ModelFallbackEntry[] {
   }));
 }
 
-// Wrapping a single model in `{ model, maxRetries }` is NOT valid Mastra config.
 export function getAgentModel(): AgentModelConfig {
   const env = getEnv();
   const primary = buildPrimary(env);

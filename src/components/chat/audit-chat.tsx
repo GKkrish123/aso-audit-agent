@@ -65,7 +65,6 @@ function isTerminal(s: AuditJob["status"]): boolean {
   return TERMINAL.includes(s);
 }
 
-/** Poll only while the server is actively working — not while waiting for user confirm. */
 function shouldPollJobStatus(s: AuditJob["status"]): boolean {
   return s === "queued" || s === "fetching_metadata" || s === "running_audit";
 }
@@ -155,7 +154,21 @@ export function AuditChat() {
   const refreshChats = useCallback(async () => {
     try {
       const page = await fetchChats();
-      setChats(page.chats);
+      const activeId = activeChatIdRef.current;
+      const localJob = activeJobRef.current;
+      setChats(
+        page.chats.map((c) => {
+          if (
+            activeId &&
+            localJob &&
+            c.chatId === activeId &&
+            c.job?.jobId === localJob.jobId
+          ) {
+            return { ...c, job: localJob };
+          }
+          return c;
+        }),
+      );
       setNextCursor(page.nextCursor);
     } catch {
     }
@@ -318,6 +331,7 @@ export function AuditChat() {
       if (isTerminal(data.job.status)) {
         stopJobPolling();
         void refreshChats();
+        window.setTimeout(() => void refreshChats(), 2500);
         return;
       }
 
@@ -435,6 +449,17 @@ export function AuditChat() {
   }, [fetchChats, loadChat, makeWelcome]);
 
   useEffect(() => () => stopJobPolling(), [stopJobPolling]);
+
+  useEffect(() => {
+    if (!activeChatId || !activeJob) return;
+    setChats((prev) =>
+      prev.map((c) =>
+        c.chatId === activeChatId && c.job?.jobId === activeJob.jobId
+          ? { ...c, job: activeJob }
+          : c,
+      ),
+    );
+  }, [activeChatId, activeJob]);
 
   useEffect(() => {
     const el = scrollRef.current;

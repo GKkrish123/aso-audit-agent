@@ -7,10 +7,9 @@ export const AppMetadataSchema = z.object({
   artistName: z.string(),
   bundleId: z.string().optional(),
   primaryGenreName: z.string().optional(),
-  /** Numeric iTunes genre id, e.g. "6008" for Photo & Video. Used by the
-   *  competitor scanner to drive genre-filtered iTunes Search + RSS top-charts. */
+
   primaryGenreId: z.string().optional(),
-  /** Full chain of iTunes genre ids (most-specific first), e.g. ["6014","7001"]. */
+
   genreIds: z.array(z.string()).optional(),
   genres: z.array(z.string()),
   artworkUrl: z.string().url(),
@@ -23,7 +22,7 @@ export const AppMetadataSchema = z.object({
   releaseDate: z.string().nullable(),
   version: z.string().nullable(),
   minimumOsVersion: z.string().nullable(),
-  // iTunes Lookup baseline so listing scrape degradation never leaves empty copy/screenshots.
+
   itunesDescription: z.string().nullable().optional(),
   itunesReleaseNotes: z.string().nullable().optional(),
   itunesScreenshotUrls: z.array(z.string().url()).optional(),
@@ -59,9 +58,9 @@ export const CompetitorSchema = z.object({
   primaryGenreName: z.string().optional(),
   appStoreUrl: z.string().url(),
   overlapScore: z.number().min(0).max(1),
-  /** Blend of source signal, genre match, token overlap, popularity, rating. */
+
   compositeScore: z.number().min(0).max(1).optional(),
-  /** top-chart is the strongest "actual competitor in this category" signal. */
+
   source: z
     .enum([
       "top-free-chart",
@@ -168,22 +167,6 @@ export type RecommendationCategory =
 export const EFFORT_UNITS = ["minutes", "hours", "days", "sprints"] as const;
 export type EffortUnit = (typeof EFFORT_UNITS)[number];
 
-/**
- * One actionable recommendation with a full proof trail. Every field after
- * `after` is treated as optional at the schema layer because LLMs vary, but
- * the workflow post-processor (`enrichRecommendation`) guarantees ALL
- * recommendations in the final report have these fields populated -
- * deriving deterministic defaults from the dimension's baseline score and
- * severity bucket when the LLM omits them. The UI can therefore render the
- * proof block unconditionally.
- *
- *   - `category`: what kind of work this is (copy/design/media/engineering/...)
- *   - `metric`:   the concrete current-vs-target gap being closed
- *   - `expectedImpact`: signed score-delta projection per affected dimension
- *   - `effort`:   concrete time estimate (minutes / hours / days / sprints)
- *   - `location`: where in App Store Connect (or off-platform) to apply
- *   - `before` / `after`: required for any text/copy change
- */
 export const RecommendationSchema = z.object({
   id: z.string().min(1),
   dimension: z.enum(DIMENSION_IDS),
@@ -222,16 +205,6 @@ export const RecommendationSchema = z.object({
 });
 export type Recommendation = z.infer<typeof RecommendationSchema>;
 
-/**
- * One competitor's evidence-backed comparison vs. the audited app. Every field
- * is derived deterministically from the iTunes payload + scanner metadata - no
- * LLM-generated numbers - so the rendered table is guaranteed accurate.
- *
- *   - `ratingDelta`  = audited.rating - competitor.rating         (signed; null if either missing)
- *   - `ratingCountRatio` = audited.ratingCount / competitor.ratingCount  (null if competitor.ratingCount <= 0)
- *   - `strengths`    = things THIS competitor does better than the audited app
- *   - `weaknesses`   = things the audited app does better than this competitor
- */
 export const CompetitorComparisonRowSchema = z.object({
   competitorAppId: z.string().min(1),
   competitorName: z.string().min(1),

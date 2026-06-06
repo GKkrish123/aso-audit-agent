@@ -8,12 +8,6 @@ import { asoAuditWorkflow } from "./workflows/aso-audit.workflow";
 
 let cached: Mastra | undefined;
 
-/**
- * Categorize the configured storage URL so we can warn loudly when running on
- * a serverless platform with a local-file store, which would silently lose
- * workflow snapshots between invocations and leave audits "stuck running"
- * forever (the #1 cause of the symptom on Vercel deploys).
- */
 function classifyStorageUrl(url: string): "file" | "memory" | "libsql-remote" | "other" {
   if (url.startsWith("file:")) return "file";
   if (url === ":memory:" || url.startsWith("memory:")) return "memory";
@@ -32,11 +26,7 @@ export function getMastra(): Mastra {
   const isServerless = !!env.VERCEL;
 
   if (isServerless && (storageKind === "file" || storageKind === "memory")) {
-    // This is a hard misconfiguration on serverless - the workflow snapshot
-    // will not be visible across invocations and audits will appear stuck on
-    // `running_audit` forever. We log loudly but do NOT throw, so the deploy
-    // still boots and the operator can see the warning in the logs / hit
-    // /api/healthz to diagnose.
+
     logger.error(
       {
         storage: env.MASTRA_DB_URL,
@@ -72,7 +62,6 @@ export function getMastra(): Mastra {
 
 export const mastra = (): Mastra => getMastra();
 
-/** Exposed for /api/healthz so misconfig is one curl away from being visible. */
 export function describeMastraStorage(): {
   url: string;
   kind: "file" | "memory" | "libsql-remote" | "other";
