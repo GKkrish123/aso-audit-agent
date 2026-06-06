@@ -84,9 +84,7 @@ export function extractFromAppStoreMarkdown(
     if (notes) out.releaseNotes = notes;
   }
 
-  // Markdown uses 1x1.gif placeholders; og:image is reliable only on Apple's CDN.
-  console.log("metadata", metadata);
-  
+  // Markdown uses 1x1.gif placeholders; og:image is reliable only on Apple's CDN.  
   if (metadata) {
     const ogImage = (metadata as Record<string, unknown>).ogImage;
     if (typeof ogImage === "string" && /mzstatic\.com/.test(ogImage)) {
@@ -213,10 +211,7 @@ export function mergeListingSources(
         return;
       }
     }
-  };
-
-  console.log("itunes", itunes);
-  
+  };  
 
   pickString("title", [0, 2, 1]);
   pickString("subtitle", [2, 1, 0]);

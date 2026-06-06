@@ -53,6 +53,18 @@ const EnvSchema = z.object({
   METADATA_TIMEOUT_MS: intish(10_000),
   LISTING_TIMEOUT_MS: intish(15_000),
   AUDIT_MAX_DURATION_MS: intish(120_000),
+  /**
+   * Hard cap on a single LLM `agent.generate()` call. Any provider that hasn't
+   * responded within this window is aborted so the surrounding function (Vercel
+   * lambda, Node worker, etc.) doesn't get killed mid-call by the platform.
+   * Default 90s leaves headroom inside a 120s Vercel Hobby budget and ~3.5x
+   * headroom inside a 300s Pro budget.
+   */
+  LLM_TIMEOUT_MS: intish(90_000),
+
+  /** Set automatically by Vercel; we use it to gate cloud-specific guardrails. */
+  VERCEL: optionalString,
+  VERCEL_ENV: optionalString,
 });
 
 export type Env = z.infer<typeof EnvSchema>;

@@ -12,6 +12,11 @@ import { nanoid } from "nanoid";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/**
+ * 60s is enough for: parse URL + 1 iTunes lookup + suspend the workflow at the
+ * confirmation gate. The much longer-running audit step uses the confirm
+ * route's budget (see /api/audit/[jobId]/confirm).
+ */
 export const maxDuration = 60;
 
 const BodySchema = z.object({ url: z.string().min(1), chatId: z.string().min(1) });
@@ -19,6 +24,7 @@ const BodySchema = z.object({ url: z.string().min(1), chatId: z.string().min(1) 
 export async function POST(req: Request): Promise<Response> {
   const correlationId = nanoid(10);
   const logger = withCorrelation(correlationId);
+  const startedAt = performance.now();
 
   const limit = consumeRateLimit(`POST /api/audit:${clientKeyFromRequest(req)}`);
   if (!limit.ok) {
@@ -47,11 +53,30 @@ export async function POST(req: Request): Promise<Response> {
     throw err;
   }
 
+  logger.info(
+    {
+      chatId: body.chatId,
+      url: body.url,
+      hop: "route.create_audit",
+      phase: "start",
+    },
+    "\u25b6 POST /api/audit",
+  );
+
   try {
     const job = await createAuditJob({ url: body.url, chatId: body.chatId });
+    const durationMs = Math.round(performance.now() - startedAt);
     logger.info(
-      { jobId: job.jobId, chatId: body.chatId, status: job.status },
-      "audit job created",
+      {
+        jobId: job.jobId,
+        chatId: body.chatId,
+        status: job.status,
+        hop: "route.create_audit",
+        phase: "end",
+        ok: true,
+        durationMs,
+      },
+      `\u2713 audit job created (${durationMs}ms, status=${job.status})`,
     );
     return NextResponse.json({ job }, { status: 201 });
   } catch (err) {

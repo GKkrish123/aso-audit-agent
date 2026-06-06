@@ -120,6 +120,16 @@ export async function runFetchListingContent(input: {
   let firecrawlListing: ExtractedListing | undefined;
   let firecrawlSourceOk = false;
   if (env.FIRECRAWL_API_KEY) {
+    const startedAt = performance.now();
+    logger.info(
+      {
+        url: input.canonicalUrl,
+        hop: "listing.firecrawl",
+        phase: "start",
+        timeoutMs: env.LISTING_TIMEOUT_MS,
+      },
+      "\u25b6 firecrawl scrape",
+    );
     try {
       firecrawlListing = await pRetry(
         () =>
@@ -134,9 +144,29 @@ export async function runFetchListingContent(input: {
         firecrawlListing?.description || firecrawlListing?.title
       );
       metrics.increment("listing.firecrawl.success");
+      logger.info(
+        {
+          url: input.canonicalUrl,
+          hop: "listing.firecrawl",
+          phase: "end",
+          ok: true,
+          durationMs: Math.round(performance.now() - startedAt),
+          hasTitle: !!firecrawlListing?.title,
+          hasDescription: !!firecrawlListing?.description,
+          descriptionChars: firecrawlListing?.description?.length ?? 0,
+        },
+        `\u2713 firecrawl scrape (${Math.round(performance.now() - startedAt)}ms)`,
+      );
     } catch (err) {
       logger.warn(
-        { url: input.canonicalUrl, err: (err as Error).message },
+        {
+          url: input.canonicalUrl,
+          hop: "listing.firecrawl",
+          phase: "end",
+          ok: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          err: (err as Error).message,
+        },
         "Firecrawl extraction failed; will fall back to direct HTML",
       );
       metrics.increment("listing.firecrawl.error");
@@ -145,6 +175,16 @@ export async function runFetchListingContent(input: {
 
   let htmlListing: ExtractedListing = {};
   if (!firecrawlSourceOk) {
+    const startedAt = performance.now();
+    logger.info(
+      {
+        url: input.canonicalUrl,
+        hop: "listing.html",
+        phase: "start",
+        timeoutMs: env.LISTING_TIMEOUT_MS,
+      },
+      "\u25b6 app store HTML fetch",
+    );
     try {
       const html = await pRetry(
         () => fetchHtml(input.canonicalUrl, env.LISTING_TIMEOUT_MS),
@@ -152,9 +192,28 @@ export async function runFetchListingContent(input: {
       );
       htmlListing = extractFromAppStoreHtml(html);
       metrics.increment("listing.html.success");
+      logger.info(
+        {
+          url: input.canonicalUrl,
+          hop: "listing.html",
+          phase: "end",
+          ok: true,
+          durationMs: Math.round(performance.now() - startedAt),
+          htmlBytes: html.length,
+          hasDescription: !!htmlListing.description,
+        },
+        `\u2713 app store HTML fetch (${Math.round(performance.now() - startedAt)}ms)`,
+      );
     } catch (err) {
       logger.warn(
-        { url: input.canonicalUrl, err: (err as Error).message },
+        {
+          url: input.canonicalUrl,
+          hop: "listing.html",
+          phase: "end",
+          ok: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          err: (err as Error).message,
+        },
         "App Store HTML extraction failed",
       );
       metrics.increment("listing.html.error");

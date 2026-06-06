@@ -536,11 +536,32 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
   // Start the workflow but don't await the full result — it suspends at
   // await-confirmation. Keep this request alive until the suspend snapshot is
   // persisted so Vercel/serverless doesn't return before the gate is saved.
+  const startStartedAt = performance.now();
   run
     .start({ inputData: { url: input.url } })
+    .then(() => {
+      logger.info(
+        {
+          jobId,
+          runId: run.runId,
+          hop: "workflow.start",
+          phase: "settled",
+          durationMs: Math.round(performance.now() - startStartedAt),
+        },
+        "workflow.start settled (suspended at confirmation gate)",
+      );
+    })
     .catch((err) => {
       logger.error(
-        { jobId, runId: run.runId, err: (err as Error).message },
+        {
+          jobId,
+          runId: run.runId,
+          hop: "workflow.start",
+          phase: "settled",
+          ok: false,
+          durationMs: Math.round(performance.now() - startStartedAt),
+          err: (err as Error).message,
+        },
         "workflow start failed",
       );
     });
@@ -606,7 +627,9 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
  * Resume the workflow with the user's confirmation.
  *
  * On `confirmed=true` the workflow advances into `run-audit` and the audit
- * is considered "started" — the chat becomes locked to this job.
+ * is considered "started" — the chat becomes locked to this job. The actual
+ * audit work runs in a background `after()` callback so the HTTP response
+ * returns immediately; the UI then polls /api/audit/:jobId for status.
  *
  * On `confirmed=false` the user rejected the metadata match BEFORE the audit
  * actually started. We release the chat by deleting the job binding so the
@@ -614,43 +637,81 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
  * still resumed (with confirmed=false) so its snapshot transitions out of
  * the suspended state cleanly instead of leaking. Returns `null` to signal
  * the binding has been released.
+ *
+ * IMPORTANT for serverless deploys: we deliberately do NOT block the HTTP
+ * response waiting for `run.resume()` to reach `running_audit`. On Vercel
+ * the route's maxDuration is the same budget the background audit work
+ * shares, so every second spent polling on the request thread is a second
+ * the LLM step doesn't have. We return immediately with the synthesized
+ * post-confirmation snapshot and let polling pick up the real state.
  */
-async function waitForAuditRunning(jobId: string): Promise<AuditJob> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const job = await getAuditJob(jobId);
-    if (job.status === "running_audit" || job.status === "completed") return job;
-    if (job.status === "failed" || job.status === "cancelled") return job;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  const job = await getAuditJob(jobId);
-  if (job.status === "awaiting_confirmation") {
-    throw new Error("Audit did not start after confirmation");
-  }
-  return job;
-}
-
 export async function confirmAuditJob(
   jobId: string,
   confirmed: boolean,
 ): Promise<AuditJob | null> {
+  const logger = getLogger();
   const idx = await getJobEntry(jobId);
   if (!idx) throw new Error(`Unknown jobId: ${jobId}`);
   const mastra = getMastra();
   const workflow = mastra.getWorkflow("asoAuditWorkflow");
   const run = await workflow.createRun({ runId: idx.runId });
+
+  const resumeStartedAt = performance.now();
+  logger.info(
+    {
+      jobId,
+      runId: idx.runId,
+      hop: "workflow.resume",
+      phase: "start",
+      confirmed,
+    },
+    `\u25b6 workflow.resume (confirmed=${confirmed})`,
+  );
   const resumeWork = run
     .resume({ step: "await-confirmation", resumeData: { confirmed } })
+    .then((res) => {
+      logger.info(
+        {
+          jobId,
+          runId: idx.runId,
+          hop: "workflow.resume",
+          phase: "end",
+          ok: true,
+          confirmed,
+          durationMs: Math.round(performance.now() - resumeStartedAt),
+          workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
+        },
+        "\u2713 workflow.resume settled",
+      );
+      return res;
+    })
     .catch((err) => {
-      if (confirmed) {
-        getLogger().error(
-          { jobId, runId: idx.runId, err: (err as Error).message },
-          "workflow resume failed",
-        );
-      }
+      // Always log resume failures - even on confirmed=false the resume can
+      // throw because the step intentionally rejects rejected confirmations.
+      // We only treat it as a real error when the user actually confirmed.
+      const level = confirmed ? "error" : "info";
+      logger[level](
+        {
+          jobId,
+          runId: idx.runId,
+          hop: "workflow.resume",
+          phase: "end",
+          ok: false,
+          confirmed,
+          durationMs: Math.round(performance.now() - resumeStartedAt),
+          err: (err as Error).message,
+        },
+        confirmed
+          ? "\u2717 workflow.resume failed"
+          : "workflow.resume completed with rejection",
+      );
     });
 
   after(async () => {
+    // This keeps the serverless function alive while the audit actually runs.
+    // On Vercel the function can stay up to `maxDuration` after the response
+    // is sent; the confirm route is configured for the platform max so the
+    // LLM call has room to finish.
     await resumeWork;
   });
 
@@ -667,7 +728,7 @@ export async function confirmAuditJob(
         args: [Date.now(), idx.chatId],
       },
     ]);
-    getLogger().info(
+    logger.info(
       { jobId, chatId: idx.chatId },
       "audit rejected before start; chat released",
     );
@@ -684,5 +745,10 @@ export async function confirmAuditJob(
       args: [Date.now(), idx.chatId],
     },
   ]);
-  return await waitForAuditRunning(jobId);
+
+  // Return immediately with current snapshot. UI polls /api/audit/:jobId for
+  // status transitions (running_audit -> completed). Blocking here for up to
+  // 30s as we used to do consumed precious budget out of the route's
+  // maxDuration window AND held the browser request open for no real benefit.
+  return await getAuditJob(jobId);
 }

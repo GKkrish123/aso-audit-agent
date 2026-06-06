@@ -13,6 +13,19 @@ import {
 } from "@/types/audit";
 import { RECOMMENDATION_FORMAT_INSTRUCTIONS } from "@/lib/aso/prompts";
 import { assertModelConfigured } from "@/lib/providers/llm-client";
+import { getEnv } from "@/lib/env";
+import { getLogger } from "@/lib/observability/logger";
+
+class LlmTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(
+      `LLM call timed out after ${timeoutMs}ms. The provider did not respond ` +
+        "in time; set LLM_TIMEOUT_MS higher, switch PRIMARY_MODEL to a faster " +
+        "model, or add FALLBACK_MODELS for automatic failover.",
+    );
+    this.name = "LlmTimeoutError";
+  }
+}
 
 /**
  * Mastra wraps the real underlying error in a `MastraError` whose `text` is
@@ -116,6 +129,8 @@ export const recommendationWriterSkill = {
   async run(input: RecommendationWriterInput): Promise<AuditReport> {
     assertModelConfigured();
 
+    const env = getEnv();
+    const logger = getLogger();
     const agent =
       input.mastra.getAgentById(input.agentId) ??
       (input.mastra as unknown as { getAgent: (n: string) => unknown })
@@ -123,21 +138,84 @@ export const recommendationWriterSkill = {
     if (!agent) {
       throw new Error(`Agent not found: ${input.agentId}`);
     }
+    const prompt = buildPrompt(input);
+    const promptChars = prompt.length;
+    const timeoutMs = env.LLM_TIMEOUT_MS;
+    const model = env.PRIMARY_MODEL;
+
+    // Hard per-call timeout via AbortSignal. Without this, a hung provider
+    // (NIM, OpenRouter outage, Anthropic 5xx) will sit indefinitely and the
+    // surrounding Vercel function gets killed at maxDuration with the workflow
+    // snapshot stuck mid-step. Aborting cleanly bubbles into translateAgentError
+    // so the job's `error` field surfaces an actionable message.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const startedAt = performance.now();
+
+    logger.info(
+      {
+        hop: "llm.generate",
+        phase: "start",
+        model,
+        timeoutMs,
+        promptChars,
+      },
+      `\u25b6 llm.generate (${model}, ${promptChars} chars, ${timeoutMs}ms budget)`,
+    );
+
     let result: { object: unknown };
     try {
-      result = await (
-        agent as {
+      result = await Promise.race([
+        (agent as {
           generate: (
-            prompt: string,
-            opts: { structuredOutput: { schema: typeof AgentOutputSchema } },
+            p: string,
+            opts: {
+              structuredOutput: { schema: typeof AgentOutputSchema };
+              abortSignal?: AbortSignal;
+            },
           ) => Promise<{ object: unknown }>;
-        }
-      ).generate(buildPrompt(input), {
-        structuredOutput: { schema: AgentOutputSchema },
-      });
+        }).generate(prompt, {
+          structuredOutput: { schema: AgentOutputSchema },
+          abortSignal: ac.signal,
+        }),
+        new Promise<never>((_, reject) => {
+          ac.signal.addEventListener("abort", () => {
+            reject(new LlmTimeoutError(timeoutMs));
+          });
+        }),
+      ]);
     } catch (err) {
+      const durationMs = Math.round(performance.now() - startedAt);
+      logger.error(
+        {
+          hop: "llm.generate",
+          phase: "end",
+          ok: false,
+          model,
+          durationMs,
+          promptChars,
+          err: (err as Error).message,
+        },
+        `\u2717 llm.generate failed (${durationMs}ms)`,
+      );
+      if (err instanceof LlmTimeoutError) throw err;
       throw translateAgentError(err);
+    } finally {
+      clearTimeout(timer);
     }
+
+    const durationMs = Math.round(performance.now() - startedAt);
+    logger.info(
+      {
+        hop: "llm.generate",
+        phase: "end",
+        ok: true,
+        model,
+        durationMs,
+        promptChars,
+      },
+      `\u2713 llm.generate (${durationMs}ms)`,
+    );
 
     const parsed = AgentOutputSchema.parse(result.object);
 

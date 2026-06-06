@@ -267,8 +267,6 @@ export function computeBaselineScores(input: {
     evidence: res.evidence,
   });
 
-  console.log("listing", listing);
-
   return [
     compute(
       "title",
