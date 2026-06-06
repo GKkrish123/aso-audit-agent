@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { confirmAuditJob } from "@/lib/jobs/audit-job-store";
+import { confirmAuditJob, WorkflowNotSuspendedError } from "@/lib/jobs/audit-job-store";
 import { withCorrelation } from "@/lib/observability/logger";
 import { nanoid } from "nanoid";
 
@@ -61,6 +61,16 @@ export async function POST(
       },
       "\u2717 confirm failed",
     );
+    if (err instanceof WorkflowNotSuspendedError) {
+      return NextResponse.json(
+        {
+          error: err.message,
+          reason: "workflow_not_suspended",
+          snapshotStatus: err.snapshotStatus,
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json(
       { error: (err as Error).message },
       { status: 400 },

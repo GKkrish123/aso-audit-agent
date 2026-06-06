@@ -106,6 +106,20 @@ export class ChatHasActiveAuditError extends Error {
   }
 }
 
+export class WorkflowNotSuspendedError extends Error {
+  readonly runId: string;
+  readonly snapshotStatus: string | null;
+
+  constructor(runId: string, snapshotStatus: string | null) {
+    super(
+      `Workflow run is not suspended (status: ${snapshotStatus ?? "unknown"}). The audit cannot be confirmed yet.`,
+    );
+    this.name = "WorkflowNotSuspendedError";
+    this.runId = runId;
+    this.snapshotStatus = snapshotStatus;
+  }
+}
+
 function asMetadata(value: unknown): AppMetadata | null {
   const parsed = AppMetadataSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
@@ -185,12 +199,11 @@ function hasPassedConfirmationGate(snapshot: SnapshotShape): boolean {
 
 function isAwaitingConfirmation(snapshot: SnapshotShape): boolean {
   if (hasPassedConfirmationGate(snapshot)) return false;
+  if (snapshot.status !== "suspended") return false;
   const fetchStep = snapshot.steps?.["fetch-metadata"];
   if (fetchStep?.status !== "success") return false;
   const confirmStep = snapshot.steps?.["await-confirmation"];
-  if (confirmStep?.status === "suspended") return true;
-  if (snapshot.status === "suspended") return true;
-  return confirmStep?.status !== "success";
+  return confirmStep?.status === "suspended";
 }
 
 function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
@@ -207,11 +220,16 @@ function inferStatus(snapshot: SnapshotShape): AuditJobStatus {
   if (isAwaitingConfirmation(snapshot)) return "awaiting_confirmation";
   if (hasPassedConfirmationGate(snapshot)) return "running_audit";
 
-  if (raw === "running" || raw === "waiting" || raw === "suspended") {
+  if (raw === "running" || raw === "waiting") {
     const fetchStep = snapshot.steps?.["fetch-metadata"];
-    if (fetchStep?.status === "success") return "awaiting_confirmation";
+    if (fetchStep?.status === "success" && snapshot.status === "suspended") {
+      return "awaiting_confirmation";
+    }
+    if (fetchStep?.status === "success") return "fetching_metadata";
     return "fetching_metadata";
   }
+
+  if (raw === "suspended") return "awaiting_confirmation";
 
   return "queued";
 }
@@ -595,62 +613,101 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
   logger.info({ jobId, chatId: input.chatId, runId: run.runId }, "audit job created");
 
   const startStartedAt = performance.now();
-  run
-    .start({ inputData: { url: input.url } })
-    .then(() => {
-      logger.info(
-        {
-          jobId,
-          runId: run.runId,
-          hop: "workflow.start",
-          phase: "settled",
-          durationMs: Math.round(performance.now() - startStartedAt),
-        },
-        "workflow.start settled (suspended at confirmation gate)",
-      );
-    })
-    .catch((err) => {
-      logger.error(
-        {
-          jobId,
-          runId: run.runId,
-          hop: "workflow.start",
-          phase: "settled",
-          ok: false,
-          durationMs: Math.round(performance.now() - startStartedAt),
-          err: (err as Error).message,
-        },
-        "workflow start failed",
-      );
-    });
-
-  return await waitForConfirmationGate(jobId);
-}
-
-async function waitForConfirmationGate(jobId: string): Promise<AuditJob> {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const job = await getAuditJob(jobId);
-    if (job.status === "awaiting_confirmation") return job;
-    if (job.status === "failed" || job.status === "cancelled") return job;
-    if (job.status === "completed") {
-      getLogger().error(
-        { jobId, status: job.status },
-        "workflow completed before user confirmed",
-      );
-      return job;
-    }
-
-    await new Promise((r) => setTimeout(r, 200));
+  try {
+    const startResult = await run.start({ inputData: { url: input.url } });
+    logger.info(
+      {
+        jobId,
+        runId: run.runId,
+        hop: "workflow.start",
+        phase: "settled",
+        durationMs: Math.round(performance.now() - startStartedAt),
+        workflowStatus:
+          (startResult as { status?: string } | undefined)?.status ?? null,
+      },
+      "workflow.start settled (suspended at confirmation gate)",
+    );
+  } catch (err) {
+    logger.error(
+      {
+        jobId,
+        runId: run.runId,
+        hop: "workflow.start",
+        phase: "settled",
+        ok: false,
+        durationMs: Math.round(performance.now() - startStartedAt),
+        err: (err as Error).message,
+      },
+      "workflow start failed",
+    );
+    throw err;
   }
+
+  await waitForWorkflowSuspended(run.runId);
   const job = await getAuditJob(jobId);
-  if (job.status === "running_audit") {
-    getLogger().error(
-      { jobId, status: job.status },
-      "confirmation gate timed out while status was running_audit",
+  if (job.status !== "awaiting_confirmation") {
+    throw new Error(
+      `Workflow did not stop at confirmation gate (status: ${job.status})`,
     );
   }
   return job;
+}
+
+async function loadWorkflowSnapshot(
+  runId: string,
+): Promise<SnapshotShape | null> {
+  const mastra = getMastra();
+  const workflow = mastra.getWorkflow("asoAuditWorkflow");
+  const snapshot = (await workflow.getWorkflowRunById(runId)) as
+    | SnapshotShape
+    | null
+    | undefined;
+  return snapshot ?? null;
+}
+
+async function waitForWorkflowSuspended(
+  runId: string,
+  maxMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const snapshot = await loadWorkflowSnapshot(runId);
+    if (snapshot?.status === "suspended") {
+      return;
+    }
+    if (
+      snapshot?.status === "failed" ||
+      snapshot?.status === "success" ||
+      snapshot?.status === "cancelled" ||
+      snapshot?.status === "canceled"
+    ) {
+      throw new WorkflowNotSuspendedError(runId, snapshot.status);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const snapshot = await loadWorkflowSnapshot(runId);
+  throw new WorkflowNotSuspendedError(runId, snapshot?.status ?? null);
+}
+
+async function executeWorkflowResume(
+  runId: string,
+  confirmed: boolean,
+): Promise<unknown> {
+  await waitForWorkflowSuspended(runId);
+  const mastra = getMastra();
+  const workflow = mastra.getWorkflow("asoAuditWorkflow");
+  const run = await workflow.createRun({ runId });
+  return run.resume({
+    step: "await-confirmation",
+    resumeData: { confirmed },
+  });
+}
+
+async function clearConfirmedAt(jobId: string): Promise<void> {
+  await getDb().execute({
+    sql: "UPDATE audit_jobs SET confirmed_at = NULL, updated_at = ? WHERE job_id = ?",
+    args: [Date.now(), jobId],
+  });
 }
 
 export async function getAuditJob(jobId: string): Promise<AuditJob> {
@@ -685,22 +742,6 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
   };
 }
 
-async function waitForResumeToProgress(
-  jobId: string,
-  maxMs = 5_000,
-): Promise<AuditJob> {
-  const started = Date.now();
-  let job = await getAuditJob(jobId);
-  while (
-    job.status === "awaiting_confirmation" &&
-    Date.now() - started < maxMs
-  ) {
-    await new Promise((r) => setTimeout(r, 120));
-    job = await getAuditJob(jobId);
-  }
-  return job;
-}
-
 export async function confirmAuditJob(
   jobId: string,
   confirmed: boolean,
@@ -709,65 +750,6 @@ export async function confirmAuditJob(
   const idx = await getJobEntry(jobId);
   if (!idx) throw new Error(`Unknown jobId: ${jobId}`);
   await ensureSchema();
-
-  const scheduleWorkflowResume = () => {
-    const mastra = getMastra();
-    const workflow = mastra.getWorkflow("asoAuditWorkflow");
-    const resumeStartedAt = performance.now();
-    logger.info(
-      {
-        jobId,
-        runId: idx.runId,
-        hop: "workflow.resume",
-        phase: "start",
-        confirmed,
-      },
-      `\u25b6 workflow.resume (confirmed=${confirmed})`,
-    );
-    const resumeWork = workflow
-      .createRun({ runId: idx.runId })
-      .then((run) =>
-        run.resume({ step: "await-confirmation", resumeData: { confirmed } }),
-      )
-      .then((res) => {
-        logger.info(
-          {
-            jobId,
-            runId: idx.runId,
-            hop: "workflow.resume",
-            phase: "end",
-            ok: true,
-            confirmed,
-            durationMs: Math.round(performance.now() - resumeStartedAt),
-            workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
-          },
-          "\u2713 workflow.resume settled",
-        );
-        return res;
-      })
-      .catch((err) => {
-        const level = confirmed ? "error" : "info";
-        logger[level](
-          {
-            jobId,
-            runId: idx.runId,
-            hop: "workflow.resume",
-            phase: "end",
-            ok: false,
-            confirmed,
-            durationMs: Math.round(performance.now() - resumeStartedAt),
-            err: (err as Error).message,
-          },
-          confirmed
-            ? "\u2717 workflow.resume failed"
-            : "workflow.resume completed with rejection",
-        );
-      });
-
-    after(async () => {
-      await resumeWork;
-    });
-  };
 
   if (!confirmed) {
     await getDb().batch([
@@ -784,9 +766,24 @@ export async function confirmAuditJob(
       { jobId, chatId: idx.chatId },
       "audit rejected before start; chat released",
     );
-    scheduleWorkflowResume();
+    after(async () => {
+      try {
+        await executeWorkflowResume(idx.runId, false);
+      } catch (err) {
+        logger.info(
+          { jobId, runId: idx.runId, err: (err as Error).message },
+          "workflow resume after rejection failed (non-fatal)",
+        );
+      }
+    });
     return null;
   }
+
+  if (idx.confirmedAt != null) {
+    return getAuditJob(jobId);
+  }
+
+  await waitForWorkflowSuspended(idx.runId);
 
   const confirmedAt = Date.now();
   await getDb().batch([
@@ -800,11 +797,50 @@ export async function confirmAuditJob(
     },
   ]);
 
-  scheduleWorkflowResume();
+  const resumeStartedAt = performance.now();
+  logger.info(
+    {
+      jobId,
+      runId: idx.runId,
+      hop: "workflow.resume",
+      phase: "start",
+      confirmed: true,
+    },
+    "\u25b6 workflow.resume (confirmed=true)",
+  );
 
-  const job = await waitForResumeToProgress(jobId);
-  return {
-    ...job,
-    status: resolveAuditJobStatus(job.status, confirmedAt),
-  };
+  try {
+    const res = await executeWorkflowResume(idx.runId, true);
+    logger.info(
+      {
+        jobId,
+        runId: idx.runId,
+        hop: "workflow.resume",
+        phase: "end",
+        ok: true,
+        confirmed: true,
+        durationMs: Math.round(performance.now() - resumeStartedAt),
+        workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
+      },
+      "\u2713 workflow.resume settled",
+    );
+  } catch (err) {
+    await clearConfirmedAt(jobId);
+    logger.error(
+      {
+        jobId,
+        runId: idx.runId,
+        hop: "workflow.resume",
+        phase: "end",
+        ok: false,
+        confirmed: true,
+        durationMs: Math.round(performance.now() - resumeStartedAt),
+        err: (err as Error).message,
+      },
+      "\u2717 workflow.resume failed",
+    );
+    throw err;
+  }
+
+  return getAuditJob(jobId);
 }
