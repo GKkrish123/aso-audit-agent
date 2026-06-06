@@ -12,6 +12,7 @@ import {
 } from "../skills/metadata-verification.skill";
 import { scoringNormalizationSkill } from "../skills/scoring-normalization.skill";
 import { recommendationWriterSkill } from "../skills/recommendation-writer.skill";
+import { buildCompetitorComparison } from "@/lib/aso/competitor-comparison";
 import {
   AppMetadataSchema,
   AuditReportSchema,
@@ -205,14 +206,6 @@ const runAuditStep = createStep({
           warnings.push(
             "No screenshots could be extracted; screenshot dimension scored as missing.",
           );
-        } else if (listing.sources.screenshots === "firecrawl") {
-          // Firecrawl's markdown body returns 1x1.gif placeholders for App Store
-          // screenshots, so we never actually want screenshots from there. If
-          // the merge picked Firecrawl it usually means iTunes had no shots
-          // either - worth surfacing because the screenshot dimension is 15%.
-          warnings.push(
-            "Screenshot URLs came from Firecrawl - these may be placeholder/social-share images rather than real screenshots; verify visually before acting on the screenshot score.",
-          );
         }
 
         const { competitors, fallbackReason } = competitorResult;
@@ -242,6 +235,16 @@ const runAuditStep = createStep({
         if (!mastra) {
           throw new Error("Mastra instance not available in workflow context");
         }
+
+        // Build the competitor-comparison table deterministically (numbers,
+        // deltas, strengths, weaknesses) so the rendered table is guaranteed
+        // accurate and survives an LLM outage. The LLM only writes the
+        // recommendations + optional score refinements.
+        const competitorComparison = buildCompetitorComparison(
+          inputData.metadata,
+          competitors,
+        );
+
         const report = await timedHop(
           "skill.recommendation_writer",
           { appId, baselineScore: overallScore },
@@ -252,6 +255,7 @@ const runAuditStep = createStep({
               metadata: inputData.metadata,
               listing,
               competitors,
+              competitorComparison,
               baselineScores: dimensionScores,
               baselineOverallScore: overallScore,
             }),

@@ -2,16 +2,21 @@ import type { Mastra } from "@mastra/core/mastra";
 import { z } from "zod";
 import {
   AuditReportSchema,
-  CompetitorComparisonRowSchema,
   RecommendationSchema,
   DimensionScoreSchema,
   type AppMetadata,
   type AuditReport,
   type Competitor,
+  type CompetitorComparisonRow,
   type DimensionScore,
   type ListingContent,
 } from "@/types/audit";
 import { RECOMMENDATION_FORMAT_INSTRUCTIONS } from "@/lib/aso/prompts";
+import {
+  buildDeterministicFixCandidates,
+  enrichRecommendation,
+  sortByImpact,
+} from "@/lib/aso/recommendations";
 import { assertModelConfigured } from "@/lib/providers/llm-client";
 import { getEnv } from "@/lib/env";
 import { getLogger } from "@/lib/observability/logger";
@@ -67,6 +72,14 @@ function translateAgentError(err: unknown): Error {
       : new Error(top);
 }
 
+/**
+ * The agent's structured output. NOTE: `competitorComparison` is intentionally
+ * NOT in this schema — the comparison table is built deterministically by
+ * `buildCompetitorComparison()` in the workflow so the rendered numbers are
+ * guaranteed accurate (no LLM hallucination of ratings/counts) and so the
+ * table survives an LLM outage. The LLM is asked only to refine scores and
+ * write recommendations grounded in the deterministic data we pass in.
+ */
 const AgentOutputSchema = z.object({
   refinedDimensionScores: z.array(DimensionScoreSchema).optional(),
   // Framework requires 3-5 recs per severity bucket (9-15 total). We allow
@@ -74,7 +87,6 @@ const AgentOutputSchema = z.object({
   // per-bucket minimum at the application layer so we can surface a useful
   // warning instead of hard-failing the whole report.
   recommendations: z.array(RecommendationSchema).min(3).max(20),
-  competitorComparison: z.array(CompetitorComparisonRowSchema),
   warnings: z.array(z.string()).default([]),
 });
 
@@ -86,17 +98,28 @@ export interface RecommendationWriterInput {
   metadata: AppMetadata;
   listing: ListingContent;
   competitors: Competitor[];
+  /**
+   * Deterministically built comparison rows from `buildCompetitorComparison`.
+   * Passed straight through to the final report — the LLM never gets to edit
+   * the numbers. Also handed to the LLM in the prompt as grounding evidence
+   * for the recommendations it writes.
+   */
+  competitorComparison: CompetitorComparisonRow[];
   baselineScores: DimensionScore[];
   baselineOverallScore: number;
 }
 
 function buildPrompt(input: RecommendationWriterInput): string {
+  const fixCandidates = buildDeterministicFixCandidates(input.baselineScores);
   return [
     "You are running the final stage of an ASO audit. You will be given:",
     "  - the verified app metadata,",
     "  - the listing content (title, subtitle, description, screenshots, etc),",
-    "  - the top 3 competitor apps in the same category,",
-    "  - the deterministic baseline scores per dimension and the overall score.",
+    "  - the top competitor apps in the same category (with deterministic",
+    "    deltas vs the audited app — DO NOT recompute these numbers),",
+    "  - the deterministic baseline scores per dimension and the overall score,",
+    "  - a ranked list of DETERMINISTIC FIX CANDIDATES — the highest-leverage",
+    "    gaps the scoring engine measured, sorted by weighted-score loss.",
     "",
     "Refine the baseline scores ONLY where you have concrete qualitative evidence",
     "(e.g. screenshot copy quality, icon distinctiveness, hook strength). Do not",
@@ -104,7 +127,11 @@ function buildPrompt(input: RecommendationWriterInput): string {
     "`refinedDimensionScores`.",
     "",
     "Produce 3-5 recommendations in each severity bucket (quickWin, highImpact,",
-    "strategic) and a competitor comparison row for each provided competitor.",
+    "strategic). Every recommendation MUST either (a) address one of the",
+    "deterministic fix candidates with concrete before/after copy or",
+    "(b) add novel qualitative insight the engine couldn't see (e.g. screenshot",
+    "design clarity, icon distinctiveness, narrative arc). Cite specific",
+    "deltas, chart positions, keyword overlaps, or rule failures as evidence.",
     "",
     RECOMMENDATION_FORMAT_INSTRUCTIONS,
     "",
@@ -114,8 +141,16 @@ function buildPrompt(input: RecommendationWriterInput): string {
     "=== LISTING CONTENT ===",
     JSON.stringify(input.listing, null, 2),
     "",
-    "=== COMPETITORS ===",
+    "=== COMPETITORS (raw scanner output) ===",
     JSON.stringify(input.competitors, null, 2),
+    "",
+    "=== COMPETITOR COMPARISON (deterministic — use as evidence; do not rewrite) ===",
+    JSON.stringify(input.competitorComparison, null, 2),
+    "",
+    "=== DETERMINISTIC FIX CANDIDATES (highest weighted-loss first) ===",
+    fixCandidates.length === 0
+      ? "(All dimensions already score 9+ — focus on strategic/optimization recs.)"
+      : JSON.stringify(fixCandidates, null, 2),
     "",
     "=== BASELINE SCORES (overall: " + String(input.baselineOverallScore) + "/100) ===",
     JSON.stringify(input.baselineScores, null, 2),
@@ -219,19 +254,57 @@ export const recommendationWriterSkill = {
 
     const parsed = AgentOutputSchema.parse(result.object);
 
+    /**
+     * Overlay LLM refinements ON TOP of the deterministic baseline rather than
+     * replacing it. The deterministic engine owns the structured proof trail
+     * (`components`, `observedValue`, `target`, `source`, `confidence`,
+     * `improvementHint`); the LLM is allowed to refine the score, augment
+     * the summary, and append narrative evidence — but it cannot strip the
+     * proof that backs the score. Without this overlay a refined score would
+     * land in the UI as a number with no scoring breakdown.
+     */
     const refinedById = new Map(
       (parsed.refinedDimensionScores ?? []).map((d) => [d.id, d] as const),
     );
-    const dimensionScores = input.baselineScores.map((b) => refinedById.get(b.id) ?? b);
+    const dimensionScores = input.baselineScores.map((baseline) => {
+      const refined = refinedById.get(baseline.id);
+      if (!refined) return baseline;
+      const score = Math.max(0, Math.min(10, refined.score ?? baseline.score));
+      const weight = baseline.weight;
+      return {
+        ...baseline,
+        score,
+        weight,
+        weightedScore: Math.round(((score * weight) / 10) * 100) / 100,
+        summary: refined.summary?.trim() ? refined.summary : baseline.summary,
+        evidence: [...(baseline.evidence ?? []), ...(refined.evidence ?? [])],
+        // LLM-supplied structured fields are accepted only when non-empty;
+        // missing ones fall back to the deterministic value.
+        improvementHint:
+          refined.improvementHint && refined.improvementHint.trim().length > 0
+            ? refined.improvementHint
+            : baseline.improvementHint,
+      };
+    });
 
     const overallScore = Math.round(
       dimensionScores.reduce((acc, s) => acc + s.weightedScore, 0),
     );
 
+    // Post-process every recommendation through the deterministic enricher so
+    // ALL recs have category / metric / expectedImpact / effort / location
+    // populated — derived from the baseline score's observedValue/target/
+    // improvementHint when the LLM omits them. The UI can then render the
+    // proof block unconditionally.
+    const enrichedRecs = parsed.recommendations.map((r) =>
+      enrichRecommendation(r, dimensionScores),
+    );
+
+    // Sort within each bucket by weighted impact (highest leverage first).
     const buckets = {
-      quickWin: parsed.recommendations.filter((r) => r.severity === "quickWin"),
-      highImpact: parsed.recommendations.filter((r) => r.severity === "highImpact"),
-      strategic: parsed.recommendations.filter((r) => r.severity === "strategic"),
+      quickWin: sortByImpact(enrichedRecs.filter((r) => r.severity === "quickWin")),
+      highImpact: sortByImpact(enrichedRecs.filter((r) => r.severity === "highImpact")),
+      strategic: sortByImpact(enrichedRecs.filter((r) => r.severity === "strategic")),
     };
     const bucketWarnings: string[] = [];
     for (const [label, items] of Object.entries(buckets) as [
@@ -245,11 +318,21 @@ export const recommendationWriterSkill = {
       }
     }
 
+    // Flatten back in bucket order (quickWin → highImpact → strategic) so the
+    // recommendations array consumers iterate in priority order.
+    const orderedRecs = [
+      ...buckets.quickWin,
+      ...buckets.highImpact,
+      ...buckets.strategic,
+    ];
+
     const report: AuditReport = {
       overallScore: Math.max(0, Math.min(100, overallScore)),
       dimensionScores,
-      recommendations: parsed.recommendations,
-      competitorComparison: parsed.competitorComparison,
+      recommendations: orderedRecs,
+      // Comparison rows come from the deterministic builder; the LLM never
+      // edits them, eliminating any chance of hallucinated ratings/counts.
+      competitorComparison: input.competitorComparison,
       warnings: [...bucketWarnings, ...parsed.warnings],
     };
     return AuditReportSchema.parse(report);

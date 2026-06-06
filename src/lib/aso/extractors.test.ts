@@ -35,7 +35,7 @@ describe("extractFromAppStoreHtml", () => {
 });
 
 describe("mergeListingSources", () => {
-  it("prefers iTunes for title, Firecrawl for long-form text when present", () => {
+  it("prefers iTunes for title, HTML for long-form text when present", () => {
     const merged = mergeListingSources(
       { title: "iTunes Title" },
       {
@@ -49,6 +49,19 @@ describe("mergeListingSources", () => {
       },
     );
     expect(merged.title).toBe("iTunes Title");
+    expect(merged.subtitle).toBe("HTML subtitle");
+    expect(merged.description).toBe("HTML body text");
+  });
+
+  it("falls back to Firecrawl for long-form text when HTML is missing it", () => {
+    const merged = mergeListingSources(
+      { title: "iTunes Title" },
+      { title: "HTML Title" },
+      {
+        description: "Firecrawl body text",
+        subtitle: "Firecrawl subtitle",
+      },
+    );
     expect(merged.subtitle).toBe("Firecrawl subtitle");
     expect(merged.description).toBe("Firecrawl body text");
   });

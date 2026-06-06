@@ -59,12 +59,15 @@ async function fetchFirecrawl(
       },
       body: JSON.stringify({
         url,
-        formats: ["markdown"],
+        // Request BOTH formats. The serialized-server-data JSON blob (only
+        // available in the HTML response) is the only source of truth for
+        // screenshots and preview videos on the modern Svelte-rendered App
+        // Store page. Markdown remains useful as a fallback when the HTML
+        // is too sanitized or the blob is missing.
+        formats: ["markdown", "html"],
         onlyMainContent: false,
-        "maxAge": 172800000,
-        "parsers": [
-            "pdf"
-        ],
+        maxAge: 172800000,
+        parsers: ["pdf"],
       }),
     });
     if (!res.ok) {
@@ -80,18 +83,27 @@ async function fetchFirecrawl(
     };
     if (!json?.data) return undefined;
 
-    // Prefer the markdown view: it is structurally clean (no JS-rendered
-    // shoebox blobs, no inline tracking attributes) and the layout is stable
-    // enough to extract title / subtitle / promo text / description /
-    // what's-new with regex. Fall back to HTML extraction only if Firecrawl
-    // didn't return any markdown for this URL.
-    if (json.data.markdown?.trim()) {
-      return extractFromAppStoreMarkdown(json.data.markdown, json.data.metadata);
+    // Strategy: HTML extraction (serialized-data + cheerio overlay) is the
+    // richest source — it returns title, subtitle, description, what's new,
+    // every screenshot, AND preview videos. Markdown is only a degraded
+    // fallback (no media, no subtitle reliably). Overlay markdown on top of
+    // HTML only for fields the HTML didn't have, so we never lose media to
+    // the markdown's 1x1.gif placeholders.
+    const fromHtml = json.data.html
+      ? extractFromAppStoreHtml(json.data.html)
+      : undefined;
+    const fromMd = json.data.markdown?.trim()
+      ? extractFromAppStoreMarkdown(json.data.markdown, json.data.metadata)
+      : undefined;
+    if (fromHtml && fromMd) {
+      // HTML wins for media + structured fields; markdown only fills
+      // promotionalText (which the JSON blob doesn't carry separately).
+      return {
+        ...fromHtml,
+        promotionalText: fromHtml.promotionalText ?? fromMd.promotionalText,
+      };
     }
-    if (json.data.html) {
-      return extractFromAppStoreHtml(json.data.html);
-    }
-    return undefined;
+    return fromHtml ?? fromMd;
   } finally {
     clearTimeout(timer);
   }
@@ -222,20 +234,26 @@ export async function runFetchListingContent(input: {
 
   const merged = mergeListingSources(itunesListing, htmlListing, firecrawlListing);
 
+  // Source attribution must mirror the merge precedence in
+  // mergeListingSources: html > firecrawl > itunes for long text & media.
+  // Both Firecrawl and direct HTML hit the same serialized-server-data blob
+  // (Apple's modern Svelte page), so screenshots from either are equally
+  // real — the old "firecrawl returns placeholders" caveat no longer applies
+  // once we parse the serialized JSON.
   const longTextSource: ListingContent["sources"]["longText"] = merged.description
-    ? firecrawlListing?.description
-      ? "firecrawl"
-      : htmlListing.description
-        ? "html"
+    ? htmlListing.description
+      ? "html"
+      : firecrawlListing?.description
+        ? "firecrawl"
         : "itunes"
     : "none";
 
   const screenshotSource: ListingContent["sources"]["screenshots"] = merged.screenshotUrls?.length
-    ? itunesListing?.screenshotUrls?.length
-      ? "itunes"
+    ? htmlListing.screenshotUrls?.length
+      ? "html"
       : firecrawlListing?.screenshotUrls?.length
         ? "firecrawl"
-        : "html"
+        : "itunes"
     : "none";
 
   const result: ListingContent = {
@@ -248,6 +266,7 @@ export async function runFetchListingContent(input: {
     ipadScreenshotUrls: merged.ipadScreenshotUrls ?? [],
     hasAppPreviewVideo: !!merged.hasAppPreviewVideo,
     appPreviewVideoUrls: merged.appPreviewVideoUrls ?? [],
+    appPreviewVideoPosters: merged.appPreviewVideoPosters ?? [],
     sources: {
       metadata: "itunes",
       longText: longTextSource,

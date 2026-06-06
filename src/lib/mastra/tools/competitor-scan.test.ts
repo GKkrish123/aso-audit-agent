@@ -268,6 +268,8 @@ describe("runCompetitorScan", () => {
               averageUserRating: 4.7,
               userRatingCount: 24_000_000,
               trackViewUrl: "https://apps.apple.com/us/app/instagram/id1111",
+              description:
+                "Instagram lets you share the moment with photos and videos. Capture, edit, and share your moment with friends and family.",
             },
             {
               trackId: 2222,
@@ -276,6 +278,8 @@ describe("runCompetitorScan", () => {
               primaryGenreName: "Photo & Video",
               averageUserRating: 4.4,
               userRatingCount: 800_000,
+              description:
+                "Bitmoji is your personal avatar. Share the moment with custom emoji.",
             },
             {
               trackId: 3333,
@@ -285,6 +289,8 @@ describe("runCompetitorScan", () => {
               averageUserRating: 4.8,
               userRatingCount: 18_000_000,
               trackViewUrl: "https://apps.apple.com/us/app/tiktok/id3333",
+              description:
+                "TikTok: share the moment. Make and share short videos, fast.",
             },
           ],
         },
@@ -300,6 +306,8 @@ describe("runCompetitorScan", () => {
               averageUserRating: 4.3,
               userRatingCount: 250_000,
               trackViewUrl: "https://apps.apple.com/us/app/bereal/id4444",
+              description:
+                "BeReal. Share the moment in a fast, authentic photo each day.",
             },
             {
               trackId: 5555, // low ratings - should be filtered
@@ -309,6 +317,7 @@ describe("runCompetitorScan", () => {
               averageUserRating: 4.0,
               userRatingCount: 8,
               trackViewUrl: "https://apps.apple.com/us/app/tinycam/id5555",
+              description: "A tiny camera utility.",
             },
           ],
         },

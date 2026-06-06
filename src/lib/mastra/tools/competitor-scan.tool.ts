@@ -24,8 +24,14 @@ const ITUNES_RSS = (
   `https://itunes.apple.com/${encodeURIComponent(country)}/rss/${kind === "topfree" ? "topfreeapplications" : "topgrossingapplications"}/limit=${limit}${genreId ? `/genre=${encodeURIComponent(genreId)}` : ""}/json`;
 
 const MIN_RATING_COUNT = 50;
-/** Drop chart/search hits with almost no lexical overlap to the target listing. */
-const MIN_RELEVANCE_SCORE = 0.06;
+/**
+ * Drop chart/search hits with insufficient lexical overlap to the target listing.
+ * Raised from 0.06 → 0.10 alongside the smarter relevance scorer (headline
+ * recall + body Jaccard). The lower bound now reliably filters Roblox/CoC
+ * out of a Call-of-Duty audit (their relevance < 0.05) while still admitting
+ * true substitutes (PUBG, Free Fire, Standoff — all > 0.30).
+ */
+const MIN_RELEVANCE_SCORE = 0.1;
 const SEARCH_LIMIT = 50;
 const TOP_CHART_LIMIT = 50;
 const MAX_SEARCH_TERMS = 8;
@@ -68,6 +74,7 @@ export function genreIdFor(name: string | undefined): string | undefined {
 }
 
 const STOPWORDS = new Set([
+  // Function words
   "a","about","above","after","again","against","all","am","an","and","any",
   "app","apps","application","applications","are","aren","as","at","be","because",
   "been","before","being","below","best","between","both","but","by","can","cannot",
@@ -82,6 +89,12 @@ const STOPWORDS = new Set([
   "through","to","too","under","until","up","use","using","very","was","wasn","we",
   "were","what","when","where","which","while","who","whom","why","will","with",
   "won","would","you","your","yours","yourself","yourselves",
+  "play","players","world","worlds","fun","way","ways","amazing","awesome",
+  "ultimate","epic","huge","incredible","today","day","days","year","years",
+  "welcome","ready","enjoy","join","millions","anyone","loved","real","truly",
+  "endless","unlimited","powerful","beautiful","favorite","favourite","perfect",
+  "made","makes","let","lets","gets","getting","want","wants","need","needs",
+  "inc","llc","ltd","corp","corporation","co","gmbh","sa","ag","srl","plc","sas",
 ]);
 
 export function tokenize(s: string | undefined | null): Set<string> {
@@ -248,11 +261,28 @@ function genreMatchScore(
   candidate: SearchResult,
 ): number {
   if (!target.primaryGenreName || !candidate.primaryGenreName) return 0.5;
-  if (candidate.primaryGenreName === target.primaryGenreName) return 1.0;
-  const targetGenres = new Set(target.genres ?? []);
-  const cGenres = new Set(candidate.genres ?? []);
-  for (const g of cGenres) if (targetGenres.has(g)) return 0.6;
-  return 0.0;
+
+  const primaryMatch =
+    candidate.primaryGenreName === target.primaryGenreName ? 1 : 0;
+
+  const targetSub = new Set(
+    (target.genres ?? []).filter((g) => g !== target.primaryGenreName),
+  );
+  const candidateSub = new Set(
+    (candidate.genres ?? []).filter((g) => g !== candidate.primaryGenreName),
+  );
+
+  let subgenreRecall: number;
+  if (targetSub.size === 0 || candidateSub.size === 0) {
+    // Unknown sub-genres — neither penalize nor reward (legacy iTunes records).
+    subgenreRecall = 0.5;
+  } else {
+    let inter = 0;
+    for (const g of targetSub) if (candidateSub.has(g)) inter++;
+    subgenreRecall = inter / targetSub.size;
+  }
+
+  return 0.35 * primaryMatch + 0.65 * subgenreRecall;
 }
 
 function popularityScore(
@@ -267,43 +297,113 @@ function popularityScore(
   );
 }
 
-/** Tokens describing what the app does — used for relevance, not iTunes query strings. */
+/**
+ * The "relevance profile" of a listing — separates the curated, intentional
+ * keywords (title + subtitle + promotional text) from the broader body
+ * vocabulary (description). This split is critical because:
+ *
+ *   - Headline tokens are *high-signal* — they're the operator's deliberate
+ *     keyword choices for App Store search. A candidate that contains them
+ *     in any field is almost certainly targeting the same user intent.
+ *   - Body tokens are *medium-signal* — every popular app's description has
+ *     hundreds of words, mostly noise. Comparing them with a symmetric Jaccard
+ *     is appropriate for "shared use-case" detection but not strong enough
+ *     to be the only signal.
+ *
+ * Combining the two with a directional recall on headline + symmetric Jaccard
+ * on body is what stops Roblox/Clash-of-Clans from being scored as Call of
+ * Duty competitors: their headlines share NONE of CoD's distinctive tokens
+ * (shooter, battle, royale, warfare), and their bodies overlap only on
+ * generic marketing fluff which is already filtered by STOPWORDS.
+ */
+export interface RelevanceProfile {
+  /** Title + subtitle + promotional text tokens — the most discriminating signals. */
+  headline: Set<string>;
+  /** Description tokens (first ~1500 chars) — used for symmetric overlap. */
+  body: Set<string>;
+}
+
+/**
+ * Build the relevance profile for the audited app. Excludes `artistName` from
+ * both sets — developer-name matches are noise (we already filter
+ * same-developer candidates), and including them risks matching other apps
+ * that simply mention the developer.
+ */
 export function buildTargetRelevanceTokens(
   metadata: AppMetadata,
   listing?: ListingContent,
-): Set<string> {
-  const tokens = new Set<string>();
-  const add = (s: string | undefined | null): void => {
-    for (const t of tokenize(s ?? "")) tokens.add(t);
+): RelevanceProfile {
+  const headline = new Set<string>();
+  const body = new Set<string>();
+  const addTo = (target: Set<string>, s: string | undefined | null): void => {
+    for (const t of tokenize(s ?? "")) target.add(t);
   };
-  add(metadata.trackName);
-  add(metadata.artistName);
+
+  addTo(headline, metadata.trackName);
   if (listing) {
-    add(listing.subtitle);
-    add(listing.promotionalText);
-    add((listing.description ?? "").slice(0, 1200));
+    addTo(headline, listing.subtitle);
+    addTo(headline, listing.promotionalText);
   }
-  add(metadata.itunesDescription?.slice(0, 1200));
-  return tokens;
+
+  const longText =
+    listing?.description?.trim() || metadata.itunesDescription?.trim() || "";
+  addTo(body, longText.slice(0, 1500));
+
+  return { headline, body };
 }
 
-function candidateRelevanceTokens(candidate: SearchResult): Set<string> {
-  const tokens = new Set<string>();
-  const add = (s: string | undefined | null): void => {
-    for (const t of tokenize(s ?? "")) tokens.add(t);
-  };
-  add(candidate.trackName);
-  add(candidate.artistName);
-  add(candidate.description?.slice(0, 1200));
-  return tokens;
+/** Build the equivalent profile for a search-result candidate. */
+function candidateProfile(candidate: SearchResult): RelevanceProfile {
+  const headline = new Set<string>();
+  const body = new Set<string>();
+  for (const t of tokenize(candidate.trackName)) headline.add(t);
+  for (const t of tokenize(candidate.description?.slice(0, 1500))) body.add(t);
+  return { headline, body };
 }
 
+/** |a ∩ b| — used for both recall and Jaccard. */
+function intersectionSize(a: Set<string>, b: Set<string>): number {
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter;
+}
+
+/**
+ * Relevance score in [0, 1], computed as:
+ *
+ *   relevance = 0.55 · headlineRecall + 0.45 · bodyJaccard
+ *
+ * Where:
+ *   - `headlineRecall` is the fraction of TARGET headline tokens (the
+ *     intentional keywords) that appear ANYWHERE in the candidate's listing
+ *     (its title OR its description body). This is a directional measure of
+ *     "does the candidate target the same user intent as us?"
+ *   - `bodyJaccard` is the symmetric Jaccard overlap of the two description
+ *     bodies — a "do these apps describe what they do in similar terms?" signal.
+ *
+ * The 55/45 weighting matters: a candidate that mentions our distinctive
+ * keywords ("shooter", "royale") in its title/description is a far stronger
+ * peer signal than one that merely shares generic marketing vocabulary in
+ * its body. This is what flips Call of Duty's competitor set from
+ * Roblox+Clash-of-Clans to Free Fire+PUBG+Standoff.
+ */
 export function relevanceScore(
-  targetTokens: Set<string>,
+  target: RelevanceProfile,
   candidate: SearchResult,
 ): number {
-  if (targetTokens.size === 0) return 0;
-  return jaccard(targetTokens, candidateRelevanceTokens(candidate));
+  const cand = candidateProfile(candidate);
+  const candAll = new Set<string>([...cand.headline, ...cand.body]);
+
+  let headlineRecall = 0;
+  if (target.headline.size > 0) {
+    const hits = intersectionSize(target.headline, candAll);
+    headlineRecall = hits / target.headline.size;
+  }
+
+  const bodyJaccard = jaccard(target.body, cand.body);
+
+  const combined = 0.55 * headlineRecall + 0.45 * bodyJaccard;
+  return Math.max(0, Math.min(1, combined));
 }
 
 /**
@@ -373,6 +473,22 @@ export async function runCompetitorScan(input: {
   const metrics = getMetrics();
   const metadata = input.metadata;
   const relevanceTokens = buildTargetRelevanceTokens(metadata, input.listing);
+  // If we don't have enough target signal to score relevance reliably (no
+  // listing passed AND no itunesDescription on metadata), skip relevance
+  // gating and rely on genre + popularity. This protects the tool-only call
+  // path (LLM invokes competitor-scan without a full workflow context).
+  const enforceRelevance =
+    relevanceTokens.headline.size + relevanceTokens.body.size >= 3;
+  if (!enforceRelevance) {
+    logger.warn(
+      {
+        appId: metadata.appId,
+        headlineSize: relevanceTokens.headline.size,
+        bodySize: relevanceTokens.body.size,
+      },
+      "Competitor scan: target relevance profile is too thin; skipping relevance gate (fallback to genre + popularity ranking).",
+    );
+  }
 
   const primaryGenreId =
     metadata.primaryGenreId ?? genreIdFor(metadata.primaryGenreName);
@@ -621,7 +737,13 @@ export async function runCompetitorScan(input: {
       continue;
     }
     const relevance = relevanceScore(relevanceTokens, full);
-    if (relevance < MIN_RELEVANCE_SCORE) {
+    // Relevance gate is only enforced when we have a meaningful basis for
+    // comparison on BOTH sides. When `enforceRelevance` is false (tool-only
+    // calls without listing, or candidates returned by iTunes without
+    // descriptions), we fall back to genre + popularity ranking. Avoids the
+    // degenerate "everything filtered" failure mode while still preferring
+    // listing-similarity when the data permits.
+    if (enforceRelevance && relevance < MIN_RELEVANCE_SCORE) {
       skippedReasons.lowRelevance = (skippedReasons.lowRelevance ?? 0) + 1;
       continue;
     }
@@ -643,43 +765,78 @@ export async function runCompetitorScan(input: {
   const maxRatingCount =
     accepted.reduce((m, c) => Math.max(m, c.full.userRatingCount ?? 0), 0) || 1;
 
-  const ranked: Array<Competitor & { _composite: number }> = accepted.map(
-    ({ appId, meta, full, relevance }) => {
-      const sourceW = SOURCE_WEIGHT[meta.source];
-      const chartSignal =
-        meta.chartRank !== undefined
-          ? Math.max(0, (TOP_CHART_LIMIT + 1 - meta.chartRank) / TOP_CHART_LIMIT)
-          : 0;
-      const genreM = genreMatchScore(metadata, full);
-      const pop = popularityScore(full.userRatingCount, maxRatingCount);
-      const ratingQ = (full.averageUserRating ?? 0) / 5;
-      // Relevance (name + description overlap) dominates so generic chart toppers
-      // (e.g. Gmail in Productivity) lose to direct substitutes (Claude, Gemini).
-      const composite =
-        0.38 * relevance +
-        0.12 * sourceW +
-        0.08 * chartSignal +
-        0.12 * genreM +
-        0.20 * pop +
-        0.10 * ratingQ;
-      const competitor: Competitor = {
-        appId,
-        trackName: full.trackName ?? "(unknown)",
-        artistName: full.artistName ?? "(unknown)",
-        averageUserRating: full.averageUserRating ?? null,
-        userRatingCount: full.userRatingCount ?? null,
-        primaryGenreName: full.primaryGenreName,
-        appStoreUrl:
-          full.trackViewUrl ??
-          `https://apps.apple.com/${resolvedCountry}/app/id${appId}`,
-        overlapScore: Number(relevance.toFixed(4)),
-        compositeScore: Number(composite.toFixed(4)),
-        source: meta.source,
-        ...(meta.chartRank !== undefined ? { chartRank: meta.chartRank } : {}),
-      };
-      return { ...competitor, _composite: composite };
-    },
-  );
+  /**
+   * Composite ranking weights (must sum to 1.0). Retuned to fix the
+   * "Call of Duty audit returns Roblox + Clash of Clans" failure mode:
+   *
+   *   relevance:    0.50  (↑ from 0.38)  Listing-similarity dominates so
+   *                                       generic top-chart leaders in the
+   *                                       same genre but unrelated use case
+   *                                       can't sneak past direct substitutes.
+   *   genreMatch:   0.18  (↑ from 0.12)  Now meaningful because the scorer
+   *                                       uses sub-genre recall, not just
+   *                                       primary-genre equality.
+   *   popularity:   0.12  (↓ from 0.20)  Reduced so absolute size doesn't
+   *                                       dominate intent fit.
+   *   sourceWeight: 0.08  (↓ from 0.12)
+   *   ratingQuality:0.08  (↓ from 0.10)
+   *   chartSignal:  0.04  (↓ from 0.08)
+   *                       ──────
+   *   total:        1.00
+   */
+  const W_RELEVANCE = 0.50;
+  const W_GENRE = 0.18;
+  const W_POP = 0.12;
+  const W_SOURCE = 0.08;
+  const W_RATING_Q = 0.08;
+  const W_CHART = 0.04;
+
+  const ranked: Array<
+    Competitor & { _composite: number; _breakdown: Record<string, number> }
+  > = accepted.map(({ appId, meta, full, relevance }) => {
+    const sourceW = SOURCE_WEIGHT[meta.source];
+    const chartSignal =
+      meta.chartRank !== undefined
+        ? Math.max(0, (TOP_CHART_LIMIT + 1 - meta.chartRank) / TOP_CHART_LIMIT)
+        : 0;
+    const genreM = genreMatchScore(metadata, full);
+    const pop = popularityScore(full.userRatingCount, maxRatingCount);
+    const ratingQ = (full.averageUserRating ?? 0) / 5;
+    const composite =
+      W_RELEVANCE * relevance +
+      W_GENRE * genreM +
+      W_POP * pop +
+      W_SOURCE * sourceW +
+      W_RATING_Q * ratingQ +
+      W_CHART * chartSignal;
+    const competitor: Competitor = {
+      appId,
+      trackName: full.trackName ?? "(unknown)",
+      artistName: full.artistName ?? "(unknown)",
+      averageUserRating: full.averageUserRating ?? null,
+      userRatingCount: full.userRatingCount ?? null,
+      primaryGenreName: full.primaryGenreName,
+      appStoreUrl:
+        full.trackViewUrl ??
+        `https://apps.apple.com/${resolvedCountry}/app/id${appId}`,
+      overlapScore: Number(relevance.toFixed(4)),
+      compositeScore: Number(composite.toFixed(4)),
+      source: meta.source,
+      ...(meta.chartRank !== undefined ? { chartRank: meta.chartRank } : {}),
+    };
+    return {
+      ...competitor,
+      _composite: composite,
+      _breakdown: {
+        relevance: Number(relevance.toFixed(3)),
+        genreM: Number(genreM.toFixed(3)),
+        pop: Number(pop.toFixed(3)),
+        sourceW: Number(sourceW.toFixed(3)),
+        ratingQ: Number(ratingQ.toFixed(3)),
+        chartSignal: Number(chartSignal.toFixed(3)),
+      },
+    };
+  });
 
   ranked.sort((a, b) => {
     if (b._composite !== a._composite) return b._composite - a._composite;
@@ -689,10 +846,33 @@ export async function runCompetitorScan(input: {
     return a.appId.localeCompare(b.appId);
   });
 
-  const top3 = ranked.slice(0, 3).map(({ _composite, ...c }) => {
-    void _composite;
-    return c;
-  });
+  // Surface the top-5 composite breakdown to logs so production failures
+  // ("why did X get picked over Y?") are diagnosable without a re-run.
+  if (ranked.length > 0) {
+    logger.info(
+      {
+        appId: metadata.appId,
+        targetName: metadata.trackName,
+        country: resolvedCountry,
+        topCandidates: ranked.slice(0, 5).map((r) => ({
+          name: r.trackName,
+          composite: Number(r._composite.toFixed(4)),
+          ...r._breakdown,
+          source: r.source,
+          chartRank: r.chartRank,
+        })),
+      },
+      "Competitor composite ranking (top 5)",
+    );
+  }
+
+  const top3 = ranked
+    .slice(0, 3)
+    .map(({ _composite, _breakdown, ...c }) => {
+      void _composite;
+      void _breakdown;
+      return c;
+    });
 
   const fallbackReason =
     top3.length === 0

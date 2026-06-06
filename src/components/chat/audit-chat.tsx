@@ -451,8 +451,18 @@ export function AuditChat() {
         if (!data.job) {
           throw new Error("Confirmation response missing job");
         }
-        setActiveJob(data.job);
-        applyJobTransition(data.job);
+        // Defense-in-depth: if the server momentarily handed us back the
+        // pre-resume snapshot (status still `awaiting_confirmation`), keep
+        // our optimistic `running_audit` so we don't bounce the UI back to
+        // the confirm card and stop polling. The server now also synthesizes
+        // `running_audit` in this race, but belt-and-suspenders is cheap.
+        const serverJob = data.job;
+        const reconciled: AuditJob =
+          serverJob.status === "awaiting_confirmation"
+            ? { ...serverJob, status: "running_audit" }
+            : serverJob;
+        setActiveJob(reconciled);
+        applyJobTransition(reconciled);
         await refreshChats();
       } catch (err) {
         if (confirmed) {
@@ -570,11 +580,6 @@ export function AuditChat() {
 
   const deleteChat = useCallback(
     async (chatId: string) => {
-      const ok =
-        typeof window !== "undefined"
-          ? window.confirm("Delete this chat and its audit? This cannot be undone.")
-          : true;
-      if (!ok) return;
       try {
         const res = await fetch(`/api/chats/${chatId}`, { method: "DELETE" });
         if (res.status === 409) {
@@ -909,6 +914,7 @@ function ChatListItem({
   const title = chat.job?.metadata?.trackName ?? "New chat";
   const status = chat.job?.status?.replace(/_/g, " ") ?? "Awaiting URL";
   const hasRunningAudit = chat.job != null && !isTerminal(chat.job.status);
+  const isNewChat = !chat.job;
   return (
     <div
       className={cn(
@@ -936,7 +942,7 @@ function ChatListItem({
           {archived ? "Archived" : status}
         </div>
       </button>
-      <DropdownMenu>
+      {!isNewChat && <DropdownMenu>
         <DropdownMenuTrigger
           render={
             <Button
@@ -977,7 +983,7 @@ function ChatListItem({
             Delete
           </DropdownMenuItem>
         </DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu>}
     </div>
   );
 }
@@ -1059,7 +1065,12 @@ function MessageRow({
           <AuditProgress status={activeJob.status} />
         )}
         {message.kind === "result" && activeJob?.report && (
-          <AuditResults report={activeJob.report} warnings={activeJob.warnings ?? []} />
+          <AuditResults
+            report={activeJob.report}
+            warnings={activeJob.warnings ?? []}
+            metadata={activeJob.metadata ?? null}
+            media={activeJob.media ?? null}
+          />
         )}
       </div>
     </div>

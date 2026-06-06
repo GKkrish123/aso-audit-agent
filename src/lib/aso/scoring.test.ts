@@ -30,7 +30,8 @@ const baseMetadata: AppMetadata = {
 const baseListing: ListingContent = {
   title: "Spotify: Music & Podcasts",
   subtitle: "Discover new music, podcasts",
-  description: "Listen to millions of songs and podcasts. Try Premium free.",
+  description:
+    "Try Spotify Premium free for 1 month. Discover 100 million songs, podcasts, and audiobooks. Trusted by 600 million users worldwide.\n\n• Listen offline\n• Hi-fi audio\n• Personalized playlists",
   releaseNotes: "Bug fixes and performance improvements.",
   promotionalText: "Free Premium trial for new users.",
   screenshotUrls: Array.from({ length: 10 }, (_, i) => `https://example.com/s${i}.png`),
@@ -87,6 +88,7 @@ describe("computeBaselineScores", () => {
     });
     const desc = out.find((d) => d.id === "description")!;
     expect(desc.score).toBe(0);
+    expect(desc.observedValue).toBeNull();
   });
 
   it("rewards full screenshot utilization", () => {
@@ -111,6 +113,163 @@ describe("computeBaselineScores", () => {
     });
     const v = out.find((d) => d.id === "appPreviewVideo")!;
     expect(v.score).toBeLessThanOrEqual(3);
+  });
+});
+
+/* ────────── New: structured-proof guarantees ────────── */
+
+describe("structured proof trail", () => {
+  it("emits an observedValue for each scored field", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    const title = out.find((d) => d.id === "title")!;
+    const subtitle = out.find((d) => d.id === "subtitle")!;
+    const description = out.find((d) => d.id === "description")!;
+    expect(title.observedValue).toBe(baseListing.title);
+    expect(subtitle.observedValue).toBe(baseListing.subtitle);
+    expect(description.observedValue?.length).toBeGreaterThan(0);
+  });
+
+  it("emits components whose contributions reconstruct the score", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    for (const d of out) {
+      const components = d.components ?? [];
+      if (components.length === 0) continue;
+      const expected =
+        (d.baseline ?? 0) +
+        components.reduce((acc, c) => acc + c.contribution, 0);
+      // Engine clamps to [0,10] and rounds to 1 decimal — verify within that tolerance.
+      const clamped = Math.max(0, Math.min(10, expected));
+      expect(d.score).toBeCloseTo(Math.round(clamped * 10) / 10, 1);
+    }
+  });
+
+  it("attaches a target benchmark to every dimension", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    for (const d of out) {
+      expect(d.target).toBeTruthy();
+    }
+  });
+
+  it("marks icon as needs_visual_review and caps deterministic score at 6", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    const icon = out.find((d) => d.id === "icon")!;
+    expect(icon.confidence).toBe("needs_visual_review");
+    expect(icon.score).toBeLessThanOrEqual(6);
+  });
+
+  it("dynamic summary mentions the actual title length", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    const title = out.find((d) => d.id === "title")!;
+    expect(title.summary).toContain(String(baseListing.title.length));
+  });
+});
+
+/* ────────── New: rule correctness fixes ────────── */
+
+describe("scoring rule fixes", () => {
+  it("does NOT flag a hyphenated brand name as a separator", () => {
+    const out = computeBaselineScores({
+      metadata: { ...baseMetadata, trackName: "Wake-Up Light Clock" },
+      listing: { ...baseListing, title: "Wake-Up Light Clock", subtitle: "Sunrise alarm" },
+      competitors: baseCompetitors,
+    });
+    const title = out.find((d) => d.id === "title")!;
+    const separatorRule = (title.components ?? []).find((c) =>
+      c.label.toLowerCase().includes("separator"),
+    );
+    expect(separatorRule).toBeUndefined();
+  });
+
+  it("does NOT flag brand reinforcement (artist token) as wasted overlap in subtitle", () => {
+    const out = computeBaselineScores({
+      metadata: { ...baseMetadata, trackName: "Spotify", artistName: "Spotify Ltd." },
+      listing: {
+        ...baseListing,
+        title: "Spotify: Music & Podcasts",
+        subtitle: "Spotify for Artists",
+      },
+      competitors: baseCompetitors,
+    });
+    const sub = out.find((d) => d.id === "subtitle")!;
+    const overlapRule = (sub.components ?? []).find((c) =>
+      c.label.toLowerCase().includes("repeats non-brand title word"),
+    );
+    expect(overlapRule).toBeUndefined();
+  });
+
+  it("does flag a real non-brand title/subtitle duplication", () => {
+    const out = computeBaselineScores({
+      metadata: { ...baseMetadata, trackName: "Calm", artistName: "Calm.com Inc." },
+      listing: {
+        ...baseListing,
+        title: "Calm: Meditation & Sleep",
+        subtitle: "Sleep stories meditation calm",
+      },
+      competitors: baseCompetitors,
+    });
+    const sub = out.find((d) => d.id === "subtitle")!;
+    const overlapRule = (sub.components ?? []).find((c) =>
+      c.label.toLowerCase().includes("repeats non-brand title word"),
+    );
+    expect(overlapRule).toBeDefined();
+  });
+
+  it('tokenizes before checking wasted words ("appendix" does not match "app")', () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: { ...baseListing, title: "Appendix Reader" },
+      competitors: baseCompetitors,
+    });
+    const title = out.find((d) => d.id === "title")!;
+    const wastedRule = (title.components ?? []).find((c) =>
+      c.label.toLowerCase().includes("wasted word"),
+    );
+    expect(wastedRule).toBeUndefined();
+  });
+
+  it("captures the social proof literal it matched", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: baseListing,
+      competitors: baseCompetitors,
+    });
+    const desc = out.find((d) => d.id === "description")!;
+    const social = (desc.components ?? []).find((c) =>
+      c.label.toLowerCase().includes("social proof"),
+    );
+    expect(social).toBeDefined();
+    expect(social!.detail).toBeTruthy();
+  });
+
+  it("produces an improvementHint when the score is below ceiling", () => {
+    const out = computeBaselineScores({
+      metadata: baseMetadata,
+      listing: { ...baseListing, subtitle: "Music" },
+      competitors: baseCompetitors,
+    });
+    const sub = out.find((d) => d.id === "subtitle")!;
+    expect(sub.score).toBeLessThan(9);
+    expect(sub.improvementHint).toBeTruthy();
   });
 });
 

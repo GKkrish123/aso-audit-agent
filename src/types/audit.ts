@@ -41,6 +41,7 @@ export const ListingContentSchema = z.object({
   ipadScreenshotUrls: z.array(z.string().url()).default([]),
   hasAppPreviewVideo: z.boolean(),
   appPreviewVideoUrls: z.array(z.string().url()).default([]),
+  appPreviewVideoPosters: z.array(z.string()).default([]).optional(),
   sources: z.object({
     metadata: z.enum(["itunes", "html", "firecrawl", "unknown"]),
     longText: z.enum(["itunes", "html", "firecrawl", "none"]),
@@ -114,6 +115,28 @@ export const DIMENSION_LABELS: Record<DimensionId, string> = {
   competitivePosition: "Competitive Position",
 };
 
+export const ScoreComponentSchema = z.object({
+  label: z.string(),
+  contribution: z.number(),
+  passed: z.boolean(),
+  detail: z.string().optional(),
+});
+export type ScoreComponent = z.infer<typeof ScoreComponentSchema>;
+
+export const SCORE_CONFIDENCE = [
+  "deterministic",
+  "heuristic",
+  "needs_visual_review",
+] as const;
+
+export const SCORE_SOURCE = [
+  "itunes",
+  "firecrawl",
+  "html",
+  "merged",
+  "computed",
+] as const;
+
 export const DimensionScoreSchema = z.object({
   id: z.enum(DIMENSION_IDS),
   score: z.number().min(0).max(10),
@@ -121,28 +144,125 @@ export const DimensionScoreSchema = z.object({
   weightedScore: z.number().min(0).max(100),
   summary: z.string(),
   evidence: z.array(z.string()).default([]),
+  baseline: z.number().min(0).max(10).optional(),
+  components: z.array(ScoreComponentSchema).default([]).optional(),
+  observedValue: z.string().nullable().optional(),
+  target: z.string().nullable().optional(),
+  source: z.enum(SCORE_SOURCE).nullable().optional(),
+  confidence: z.enum(SCORE_CONFIDENCE).optional(),
+  improvementHint: z.string().nullable().optional(),
 });
 export type DimensionScore = z.infer<typeof DimensionScoreSchema>;
 
+export const RECOMMENDATION_CATEGORIES = [
+  "copy",
+  "design",
+  "media",
+  "engineering",
+  "marketing",
+  "strategy",
+] as const;
+export type RecommendationCategory =
+  (typeof RECOMMENDATION_CATEGORIES)[number];
+
+export const EFFORT_UNITS = ["minutes", "hours", "days", "sprints"] as const;
+export type EffortUnit = (typeof EFFORT_UNITS)[number];
+
+/**
+ * One actionable recommendation with a full proof trail. Every field after
+ * `after` is treated as optional at the schema layer because LLMs vary, but
+ * the workflow post-processor (`enrichRecommendation`) guarantees ALL
+ * recommendations in the final report have these fields populated -
+ * deriving deterministic defaults from the dimension's baseline score and
+ * severity bucket when the LLM omits them. The UI can therefore render the
+ * proof block unconditionally.
+ *
+ *   - `category`: what kind of work this is (copy/design/media/engineering/...)
+ *   - `metric`:   the concrete current-vs-target gap being closed
+ *   - `expectedImpact`: signed score-delta projection per affected dimension
+ *   - `effort`:   concrete time estimate (minutes / hours / days / sprints)
+ *   - `location`: where in App Store Connect (or off-platform) to apply
+ *   - `before` / `after`: required for any text/copy change
+ */
 export const RecommendationSchema = z.object({
   id: z.string().min(1),
   dimension: z.enum(DIMENSION_IDS),
   severity: z.enum(["quickWin", "highImpact", "strategic"]),
+  category: z.enum(RECOMMENDATION_CATEGORIES).optional(),
   title: z.string().min(3),
   rationale: z.string().min(10),
   evidence: z.string().min(3),
   before: z.string().nullable(),
   after: z.string().nullable(),
+  metric: z
+    .object({
+      current: z.string().min(1),
+      target: z.string().min(1),
+    })
+    .nullable()
+    .optional(),
+  expectedImpact: z
+    .array(
+      z.object({
+        dimensionId: z.enum(DIMENSION_IDS),
+        expectedDelta: z.number().min(-10).max(10),
+        note: z.string().optional(),
+      }),
+    )
+    .default([])
+    .optional(),
+  effort: z
+    .object({
+      unit: z.enum(EFFORT_UNITS),
+      estimate: z.number().positive(),
+    })
+    .nullable()
+    .optional(),
+  location: z.string().nullable().optional(),
 });
 export type Recommendation = z.infer<typeof RecommendationSchema>;
 
+/**
+ * One competitor's evidence-backed comparison vs. the audited app. Every field
+ * is derived deterministically from the iTunes payload + scanner metadata - no
+ * LLM-generated numbers - so the rendered table is guaranteed accurate.
+ *
+ *   - `ratingDelta`  = audited.rating - competitor.rating         (signed; null if either missing)
+ *   - `ratingCountRatio` = audited.ratingCount / competitor.ratingCount  (null if competitor.ratingCount <= 0)
+ *   - `strengths`    = things THIS competitor does better than the audited app
+ *   - `weaknesses`   = things the audited app does better than this competitor
+ */
 export const CompetitorComparisonRowSchema = z.object({
   competitorAppId: z.string().min(1),
   competitorName: z.string().min(1),
+  developerName: z.string().min(1),
+  category: z.string().nullable(),
+  appStoreUrl: z.string().url(),
+
   rating: z.number().nullable(),
   ratingCount: z.number().nullable(),
+
+  ratingDelta: z.number().nullable(),
+  ratingCountRatio: z.number().nullable(),
+
   keywordOverlap: z.number().min(0).max(1),
-  notes: z.string().min(3),
+  compositeSimilarity: z.number().min(0).max(1).nullable(),
+
+  source: z
+    .enum([
+      "top-free-chart",
+      "top-grossing-chart",
+      "genre-search",
+      "subgenre-search",
+      "term-search",
+    ])
+    .nullable(),
+  chartRank: z.number().int().positive().nullable(),
+
+  strengths: z.array(z.string()).default([]),
+  weaknesses: z.array(z.string()).default([]),
+
+  notes: z.string().default(""),
 });
 export type CompetitorComparisonRow = z.infer<
   typeof CompetitorComparisonRowSchema
@@ -168,6 +288,21 @@ export const AUDIT_JOB_STATUSES = [
 ] as const;
 export type AuditJobStatus = (typeof AUDIT_JOB_STATUSES)[number];
 
+export const AuditMediaSchema = z.object({
+  iconUrl: z.string().url().nullable(),
+  iphoneScreenshots: z.array(z.string().url()).default([]),
+  ipadScreenshots: z.array(z.string().url()).default([]),
+  appPreviewVideos: z
+    .array(
+      z.object({
+        url: z.string().url(),
+        posterUrl: z.string().url().nullable().optional(),
+      }),
+    )
+    .default([]),
+});
+export type AuditMedia = z.infer<typeof AuditMediaSchema>;
+
 export const AuditJobSchema = z.object({
   jobId: z.string(),
   runId: z.string(),
@@ -182,6 +317,7 @@ export const AuditJobSchema = z.object({
     .nullable(),
   metadata: AppMetadataSchema.nullable(),
   report: AuditReportSchema.nullable(),
+  media: AuditMediaSchema.nullable(),
   warnings: z.array(z.string()).default([]),
   error: z.string().nullable(),
   createdAt: z.number(),

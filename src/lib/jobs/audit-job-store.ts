@@ -114,6 +114,56 @@ function asReport(value: unknown): AuditReport | null {
   return parsed.success ? parsed.data : null;
 }
 
+function asMedia(
+  listing: unknown,
+  metadata: AppMetadata | null,
+): AuditJob["media"] {
+  const l = (listing && typeof listing === "object" ? listing : null) as
+    | {
+        screenshotUrls?: unknown;
+        ipadScreenshotUrls?: unknown;
+        appPreviewVideoUrls?: unknown;
+        appPreviewVideoPosters?: unknown;
+      }
+    | null;
+  const onlyUrls = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((s): s is string => typeof s === "string" && s.length > 0)
+      : [];
+
+  const iphoneScreenshots = onlyUrls(l?.screenshotUrls);
+  const ipadScreenshots = onlyUrls(l?.ipadScreenshotUrls);
+  const videoUrls = onlyUrls(l?.appPreviewVideoUrls);
+  const videoPostersRaw = Array.isArray(l?.appPreviewVideoPosters)
+    ? l.appPreviewVideoPosters
+    : [];
+  const appPreviewVideos = videoUrls.map((url, i) => {
+    const poster = videoPostersRaw[i];
+    return {
+      url,
+      posterUrl:
+        typeof poster === "string" && poster.length > 0 ? poster : null,
+    };
+  });
+  const iconUrl = metadata?.artworkUrl ?? null;
+
+  if (
+    iphoneScreenshots.length === 0 &&
+    ipadScreenshots.length === 0 &&
+    appPreviewVideos.length === 0 &&
+    !iconUrl
+  ) {
+    return null;
+  }
+
+  return {
+    iconUrl,
+    iphoneScreenshots,
+    ipadScreenshots,
+    appPreviewVideos,
+  };
+}
+
 function getStepOutput(
   snapshot: SnapshotShape,
   stepId: string,
@@ -178,6 +228,7 @@ function snapshotToJob(
     asMetadata(fetchOut?.metadata) ??
     asMetadata(snapshot.initialState?.metadata);
   const report = asReport(auditOut?.report) ?? asReport(snapshot.result?.report);
+  const media = asMedia(auditOut?.listing, metadata);
   const parsedRaw =
     (fetchOut?.parsed as { appId?: string; storefront?: string; canonicalUrl?: string } | undefined) ??
     (snapshot.initialState?.parsed as
@@ -209,6 +260,7 @@ function snapshotToJob(
     parsed,
     metadata,
     report,
+    media,
     warnings,
     error: errorMsg ?? null,
     createdAt,
@@ -614,6 +666,7 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
       parsed: null,
       metadata: null,
       report: null,
+      media: null,
       warnings: [],
       error: null,
       createdAt: idx.createdAt,
@@ -624,12 +677,41 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
 }
 
 /**
+ * Wait for the workflow snapshot to leave `awaiting_confirmation` after a
+ * resume has been kicked off. Returns the moment the transition is observed,
+ * or after `maxMs` if Mastra hasn't written the transitional snapshot yet.
+ *
+ * This is intentionally a SHORT wait (default 5s) — it exists only to give
+ * Mastra's snapshot writer enough time to flush the `await-confirmation:
+ * success` / `run-audit: running` transition before we respond. The original
+ * 30s `waitForAuditRunning` ate the function budget for no real benefit; 5s
+ * is enough in practice and trivial relative to the 300s confirm-route
+ * `maxDuration` on Vercel Pro.
+ */
+async function waitForResumeToProgress(
+  jobId: string,
+  maxMs = 5_000,
+): Promise<AuditJob> {
+  const started = Date.now();
+  let job = await getAuditJob(jobId);
+  while (
+    job.status === "awaiting_confirmation" &&
+    Date.now() - started < maxMs
+  ) {
+    await new Promise((r) => setTimeout(r, 120));
+    job = await getAuditJob(jobId);
+  }
+  return job;
+}
+
+/**
  * Resume the workflow with the user's confirmation.
  *
  * On `confirmed=true` the workflow advances into `run-audit` and the audit
  * is considered "started" — the chat becomes locked to this job. The actual
  * audit work runs in a background `after()` callback so the HTTP response
- * returns immediately; the UI then polls /api/audit/:jobId for status.
+ * returns quickly; the UI then polls /api/audit/:jobId for status until
+ * `completed` or `failed`.
  *
  * On `confirmed=false` the user rejected the metadata match BEFORE the audit
  * actually started. We release the chat by deleting the job binding so the
@@ -638,12 +720,16 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
  * the suspended state cleanly instead of leaking. Returns `null` to signal
  * the binding has been released.
  *
- * IMPORTANT for serverless deploys: we deliberately do NOT block the HTTP
- * response waiting for `run.resume()` to reach `running_audit`. On Vercel
- * the route's maxDuration is the same budget the background audit work
- * shares, so every second spent polling on the request thread is a second
- * the LLM step doesn't have. We return immediately with the synthesized
- * post-confirmation snapshot and let polling pick up the real state.
+ * Response semantics for confirmed=true:
+ *  1. Fire `run.resume()` (background, awaited inside `after()`).
+ *  2. Wait briefly (≤5s) for the snapshot to transition off
+ *     `awaiting_confirmation`. This avoids handing the client a stale
+ *     "awaiting_confirmation" job that would cancel the optimistic UI update
+ *     and stop polling (since the UI excludes that status from its polling
+ *     allowlist — see `shouldPollJobStatus` in audit-chat.tsx).
+ *  3. If the snapshot still hasn't progressed after the wait window, synthesize
+ *     a `running_audit` status in the response (we KNOW resume was fired and
+ *     accepted). The next poll will see the real snapshot.
  */
 export async function confirmAuditJob(
   jobId: string,
@@ -746,9 +832,25 @@ export async function confirmAuditJob(
     },
   ]);
 
-  // Return immediately with current snapshot. UI polls /api/audit/:jobId for
-  // status transitions (running_audit -> completed). Blocking here for up to
-  // 30s as we used to do consumed precious budget out of the route's
-  // maxDuration window AND held the browser request open for no real benefit.
-  return await getAuditJob(jobId);
+  // Wait briefly for Mastra to write the post-resume snapshot transition. In
+  // practice this resolves in <500ms; cap at 5s so we never block the response
+  // meaningfully.
+  const job = await waitForResumeToProgress(jobId);
+  if (job.status === "awaiting_confirmation") {
+    // Mastra hasn't flushed the transition yet but we KNOW resume was kicked
+    // off successfully (resumeWork is in flight inside `after()`). Synthesize
+    // running_audit so the client UI flips out of the confirm card and starts
+    // polling. The very next poll will see the authoritative snapshot.
+    logger.warn(
+      {
+        jobId,
+        runId: idx.runId,
+        hop: "workflow.resume",
+        phase: "synthesized",
+      },
+      "snapshot still awaiting_confirmation after resume; synthesizing running_audit for client response",
+    );
+    return { ...job, status: "running_audit", updatedAt: Date.now() };
+  }
+  return job;
 }
