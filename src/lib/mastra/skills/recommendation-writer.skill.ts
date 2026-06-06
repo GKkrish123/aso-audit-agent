@@ -2,8 +2,8 @@ import type { Mastra } from "@mastra/core/mastra";
 import { z } from "zod";
 import {
   AuditReportSchema,
-  RecommendationSchema,
   DimensionScoreSchema,
+  LlmRecommendationSchema,
   type AppMetadata,
   type AuditReport,
   type Competitor,
@@ -15,6 +15,7 @@ import { RECOMMENDATION_FORMAT_INSTRUCTIONS } from "@/lib/aso/prompts";
 import {
   buildDeterministicFixCandidates,
   enrichRecommendation,
+  normalizeLlmRecommendation,
   sortByImpact,
 } from "@/lib/aso/recommendations";
 import { assertModelConfigured } from "@/lib/providers/llm-client";
@@ -68,7 +69,7 @@ function translateAgentError(err: unknown): Error {
 const AgentOutputSchema = z.object({
   refinedDimensionScores: z.array(DimensionScoreSchema).optional(),
 
-  recommendations: z.array(RecommendationSchema).min(3).max(20),
+  recommendations: z.array(LlmRecommendationSchema).min(3).max(20),
   warnings: z.array(z.string()).default([]),
 });
 
@@ -254,7 +255,7 @@ export const recommendationWriterSkill = {
     );
 
     const enrichedRecs = parsed.recommendations.map((r) =>
-      enrichRecommendation(r, dimensionScores),
+      enrichRecommendation(normalizeLlmRecommendation(r), dimensionScores),
     );
 
     const buckets = {

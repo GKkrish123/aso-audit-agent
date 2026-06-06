@@ -205,6 +205,19 @@ export const RecommendationSchema = z.object({
 });
 export type Recommendation = z.infer<typeof RecommendationSchema>;
 
+export const LlmRecommendationSchema = RecommendationSchema.omit({
+  effort: true,
+}).extend({
+  effort: z
+    .object({
+      unit: z.enum(EFFORT_UNITS),
+      estimate: z.number(),
+    })
+    .nullable()
+    .optional(),
+});
+export type LlmRecommendation = z.infer<typeof LlmRecommendationSchema>;
+
 export const CompetitorComparisonRowSchema = z.object({
   competitorAppId: z.string().min(1),
   competitorName: z.string().min(1),

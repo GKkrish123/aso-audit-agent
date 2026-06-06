@@ -2,6 +2,7 @@ import {
   DIMENSION_WEIGHTS,
   type DimensionId,
   type DimensionScore,
+  type LlmRecommendation,
   type Recommendation,
   type RecommendationCategory,
 } from "@/types/audit";
@@ -57,6 +58,16 @@ function defaultDeltaForSeverity(
 
 function r2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+export function normalizeLlmRecommendation(rec: LlmRecommendation): Recommendation {
+  const effort =
+    rec.effort &&
+    Number.isFinite(rec.effort.estimate) &&
+    rec.effort.estimate > 0
+      ? rec.effort
+      : undefined;
+  return { ...rec, effort };
 }
 
 export function enrichRecommendation(
