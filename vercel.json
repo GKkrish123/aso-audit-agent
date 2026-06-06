@@ -5,7 +5,7 @@
       "maxDuration": 60
     },
     "src/app/api/audit/[jobId]/confirm/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 60
     },
     "src/app/api/audit/[jobId]/route.ts": {
       "maxDuration": 10

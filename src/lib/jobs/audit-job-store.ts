@@ -797,7 +797,6 @@ export async function confirmAuditJob(
     },
   ]);
 
-  const resumeStartedAt = performance.now();
   logger.info(
     {
       jobId,
@@ -806,41 +805,43 @@ export async function confirmAuditJob(
       phase: "start",
       confirmed: true,
     },
-    "\u25b6 workflow.resume (confirmed=true)",
+    "\u25b6 workflow.resume (confirmed=true, background)",
   );
 
-  try {
-    const res = await executeWorkflowResume(idx.runId, true);
-    logger.info(
-      {
-        jobId,
-        runId: idx.runId,
-        hop: "workflow.resume",
-        phase: "end",
-        ok: true,
-        confirmed: true,
-        durationMs: Math.round(performance.now() - resumeStartedAt),
-        workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
-      },
-      "\u2713 workflow.resume settled",
-    );
-  } catch (err) {
-    await clearConfirmedAt(jobId);
-    logger.error(
-      {
-        jobId,
-        runId: idx.runId,
-        hop: "workflow.resume",
-        phase: "end",
-        ok: false,
-        confirmed: true,
-        durationMs: Math.round(performance.now() - resumeStartedAt),
-        err: (err as Error).message,
-      },
-      "\u2717 workflow.resume failed",
-    );
-    throw err;
-  }
+  after(async () => {
+    const resumeStartedAt = performance.now();
+    try {
+      const res = await executeWorkflowResume(idx.runId, true);
+      logger.info(
+        {
+          jobId,
+          runId: idx.runId,
+          hop: "workflow.resume",
+          phase: "end",
+          ok: true,
+          confirmed: true,
+          durationMs: Math.round(performance.now() - resumeStartedAt),
+          workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
+        },
+        "\u2713 workflow.resume settled",
+      );
+    } catch (err) {
+      await clearConfirmedAt(jobId);
+      logger.error(
+        {
+          jobId,
+          runId: idx.runId,
+          hop: "workflow.resume",
+          phase: "end",
+          ok: false,
+          confirmed: true,
+          durationMs: Math.round(performance.now() - resumeStartedAt),
+          err: (err as Error).message,
+        },
+        "\u2717 workflow.resume failed",
+      );
+    }
+  });
 
   return getAuditJob(jobId);
 }
