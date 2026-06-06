@@ -70,6 +70,22 @@ function shouldPollJobStatus(s: AuditJob["status"]): boolean {
   return s === "queued" || s === "fetching_metadata" || s === "running_audit";
 }
 
+function appendProgressMessage(messages: ChatMessage[], jobId: string): ChatMessage[] {
+  if (messages.some((m) => "jobId" in m && m.jobId === jobId && m.kind === "progress")) {
+    return messages;
+  }
+  return [
+    ...messages,
+    { id: `prog-${jobId}`, role: "agent", kind: "progress", jobId },
+  ];
+}
+
+function removeProgressMessage(messages: ChatMessage[], jobId: string): ChatMessage[] {
+  return messages.filter(
+    (m) => !("jobId" in m && m.jobId === jobId && m.kind === "progress"),
+  );
+}
+
 export function AuditChat() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -93,6 +109,12 @@ export function AuditChat() {
   const loadChatRequestRef = useRef(0);
   const activeChatIdRef = useRef<string | null>(null);
   const switchingChatRef = useRef(false);
+  const confirmInFlightRef = useRef(false);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+  const pollGenRef = useRef(0);
+  const activeJobRef = useRef<AuditJob | null>(null);
+  activeJobRef.current = activeJob;
   activeChatIdRef.current = activeChatId;
   switchingChatRef.current = switchingChat;
 
@@ -228,6 +250,108 @@ export function AuditChat() {
     setMessages(base);
   }, [makeWelcome]);
 
+  const applyJobTransition = useCallback((job: AuditJob) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const has = (kind: string, id: string) =>
+        next.some((m) => "jobId" in m && m.jobId === id && m.kind === kind);
+
+      if (job.metadata && !has("confirm", job.jobId)) {
+        next.push({ id: `confirm-${job.jobId}`, role: "agent", kind: "confirm", jobId: job.jobId });
+      }
+      if (job.status === "running_audit" && !has("progress", job.jobId)) {
+        next.push({ id: `prog-${job.jobId}`, role: "agent", kind: "progress", jobId: job.jobId });
+      }
+      if (job.status === "completed" && job.report && !has("result", job.jobId)) {
+        next.push({ id: `result-${job.jobId}`, role: "agent", kind: "result", jobId: job.jobId });
+      }
+      if (job.status === "failed" && !next.some((m) => m.kind === "error" && m.id === `err-${job.jobId}`)) {
+        next.push({
+          id: `err-${job.jobId}`,
+          role: "agent",
+          kind: "error",
+          text: job.error ?? "The audit failed. Please try again.",
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  const stopJobPolling = useCallback(() => {
+    pollGenRef.current += 1;
+    if (pollTimerRef.current != null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
+  }, []);
+
+  const runJobPoll = useCallback(async () => {
+    pollTimerRef.current = null;
+    const gen = pollGenRef.current;
+    if (confirmInFlightRef.current) return;
+
+    const job = activeJobRef.current;
+    if (!job || !shouldPollJobStatus(job.status)) return;
+
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+
+    try {
+      const res = await fetch(`/api/audit/${job.jobId}`, {
+        signal: controller.signal,
+      });
+      if (gen !== pollGenRef.current || confirmInFlightRef.current) return;
+      if (!res.ok) return;
+
+      const data = (await res.json()) as { job: AuditJob };
+      if (gen !== pollGenRef.current || confirmInFlightRef.current) return;
+
+      setActiveJob(() => {
+        activeJobRef.current = data.job;
+        return data.job;
+      });
+
+      applyJobTransition(data.job);
+
+      if (isTerminal(data.job.status)) {
+        stopJobPolling();
+        void refreshChats();
+        return;
+      }
+
+      if (data.job.status === "awaiting_confirmation") {
+        stopJobPolling();
+        return;
+      }
+
+      if (gen === pollGenRef.current && shouldPollJobStatus(data.job.status)) {
+        pollTimerRef.current = window.setTimeout(() => void runJobPoll(), 3000);
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      if (gen === pollGenRef.current && !confirmInFlightRef.current) {
+        const current = activeJobRef.current;
+        if (current && shouldPollJobStatus(current.status)) {
+          pollTimerRef.current = window.setTimeout(() => void runJobPoll(), 3000);
+        }
+      }
+    } finally {
+      if (pollAbortRef.current === controller) {
+        pollAbortRef.current = null;
+      }
+    }
+  }, [applyJobTransition, refreshChats, stopJobPolling]);
+
+  const startJobPolling = useCallback(() => {
+    if (confirmInFlightRef.current) return;
+    const job = activeJobRef.current;
+    if (!job || !shouldPollJobStatus(job.status)) return;
+    stopJobPolling();
+    pollTimerRef.current = window.setTimeout(() => void runJobPoll(), 3000);
+  }, [runJobPoll, stopJobPolling]);
+
   const loadChat = useCallback(
     async (chatId: string) => {
       if (chatId === activeChatIdRef.current && !switchingChatRef.current) return;
@@ -239,6 +363,9 @@ export function AuditChat() {
       setInput("");
       setMessages([]);
       setActiveJob(null);
+      activeJobRef.current = null;
+      confirmInFlightRef.current = false;
+      stopJobPolling();
       setConfirmPending(false);
       try {
         const res = await fetch(`/api/chats/${chatId}`);
@@ -246,9 +373,14 @@ export function AuditChat() {
         if (!res.ok) throw new Error("Failed to load chat");
         const data = (await res.json()) as { chat: ChatRecord };
         if (requestId !== loadChatRequestRef.current) return;
-        setActiveJob(data.chat.job);
-        if (data.chat.job) {
-          rehydrateFromJob(data.chat.job);
+        const job = data.chat.job;
+        setActiveJob(job);
+        activeJobRef.current = job;
+        if (job) {
+          rehydrateFromJob(job);
+          if (shouldPollJobStatus(job.status)) {
+            startJobPolling();
+          }
         } else {
           setMessages(makeWelcome());
         }
@@ -264,7 +396,7 @@ export function AuditChat() {
         }
       }
     },
-    [makeWelcome, rehydrateFromJob],
+    [makeWelcome, rehydrateFromJob, startJobPolling, stopJobPolling],
   );
 
   useEffect(() => {
@@ -302,54 +434,7 @@ export function AuditChat() {
     };
   }, [fetchChats, loadChat, makeWelcome]);
 
-  const applyJobTransition = useCallback((job: AuditJob) => {
-    setMessages((prev) => {
-      const next = [...prev];
-      const has = (kind: string, id: string) =>
-        next.some((m) => "jobId" in m && m.jobId === id && m.kind === kind);
-
-      if (job.metadata && !has("confirm", job.jobId)) {
-        next.push({ id: `confirm-${job.jobId}`, role: "agent", kind: "confirm", jobId: job.jobId });
-      }
-      if (job.status === "running_audit" && !has("progress", job.jobId)) {
-        next.push({ id: `prog-${job.jobId}`, role: "agent", kind: "progress", jobId: job.jobId });
-      }
-      if (job.status === "completed" && job.report && !has("result", job.jobId)) {
-        next.push({ id: `result-${job.jobId}`, role: "agent", kind: "result", jobId: job.jobId });
-      }
-      if (job.status === "failed" && !next.some((m) => m.kind === "error" && m.id === `err-${job.jobId}`)) {
-        next.push({
-          id: `err-${job.jobId}`,
-          role: "agent",
-          kind: "error",
-          text: job.error ?? "The audit failed. Please try again.",
-        });
-      }
-      return next;
-    });
-  }, []);
-
-  const activeJobId = activeJob?.jobId;
-  const activeJobStatus = activeJob?.status;
-
-  useEffect(() => {
-    if (!activeJobId || activeJobStatus == null) return;
-    if (!shouldPollJobStatus(activeJobStatus)) return;
-    const interval = window.setInterval(async () => {
-      try {
-        const res = await fetch(`/api/audit/${activeJobId}`);
-        if (!res.ok) return;
-        const data = (await res.json()) as { job: AuditJob };
-        setActiveJob(data.job);
-        applyJobTransition(data.job);
-        if (isTerminal(data.job.status)) {
-          void refreshChats();
-        }
-      } catch {
-      }
-    }, 3000); // for now I'm keeping this at 3 seconds to avoid overwhelming the server
-    return () => window.clearInterval(interval);
-  }, [activeJobId, activeJobStatus, applyJobTransition, refreshChats]);
+  useEffect(() => () => stopJobPolling(), [stopJobPolling]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -389,7 +474,9 @@ export function AuditChat() {
         throw new Error(data.error ?? "Failed to create audit");
       }
       setActiveJob(data.job);
+      activeJobRef.current = data.job;
       applyJobTransition(data.job);
+      startJobPolling();
       await refreshChats();
     } catch (err) {
       toast.error("Could not start the audit", {
@@ -407,17 +494,21 @@ export function AuditChat() {
     } finally {
       setSubmitting(false);
     }
-  }, [activeChatId, activeJob, applyJobTransition, input, refreshChats]);
+  }, [activeChatId, activeJob, applyJobTransition, input, refreshChats, startJobPolling]);
 
   const confirm = useCallback(
     async (confirmed: boolean) => {
-      if (!activeJob) return;
+      if (!activeJob || confirmInFlightRef.current) return;
+
+      stopJobPolling();
+      confirmInFlightRef.current = true;
       setConfirmPending(true);
+
       if (confirmed) {
-        const optimistic = { ...activeJob, status: "running_audit" as const };
-        setActiveJob(optimistic);
-        applyJobTransition(optimistic);
+        setMessages((prev) => appendProgressMessage(prev, activeJob.jobId));
       }
+
+      let resumePolling = false;
       try {
         const res = await fetch(`/api/audit/${activeJob.jobId}/confirm`, {
           method: "POST",
@@ -433,8 +524,8 @@ export function AuditChat() {
         }
 
         if (!confirmed) {
-          // Rejected before the audit started: chat is free again.
           setActiveJob(null);
+          activeJobRef.current = null;
           setMessages([
             ...makeWelcome(),
             {
@@ -451,29 +542,25 @@ export function AuditChat() {
         if (!data.job) {
           throw new Error("Confirmation response missing job");
         }
-        // Defense-in-depth: if the server momentarily handed us back the
-        // pre-resume snapshot (status still `awaiting_confirmation`), keep
-        // our optimistic `running_audit` so we don't bounce the UI back to
-        // the confirm card and stop polling. The server now also synthesizes
-        // `running_audit` in this race, but belt-and-suspenders is cheap.
-        const serverJob = data.job;
-        const reconciled: AuditJob =
-          serverJob.status === "awaiting_confirmation"
-            ? { ...serverJob, status: "running_audit" }
-            : serverJob;
-        setActiveJob(reconciled);
-        applyJobTransition(reconciled);
+        setActiveJob(data.job);
+        activeJobRef.current = data.job;
+        applyJobTransition(data.job);
         await refreshChats();
+        resumePolling = true;
       } catch (err) {
         if (confirmed) {
-          setActiveJob(activeJob);
+          setMessages((prev) => removeProgressMessage(prev, activeJob.jobId));
         }
         toast.error("Confirmation failed", { description: (err as Error).message });
       } finally {
+        confirmInFlightRef.current = false;
         setConfirmPending(false);
+        if (resumePolling) {
+          startJobPolling();
+        }
       }
     },
-    [activeJob, applyJobTransition, makeWelcome, refreshChats],
+    [activeJob, applyJobTransition, makeWelcome, refreshChats, startJobPolling, stopJobPolling],
   );
 
   const createNewChat = useCallback(async () => {
@@ -1062,7 +1149,9 @@ function MessageRow({
           </Card>
         )}
         {message.kind === "progress" && activeJob && (
-          <AuditProgress status={activeJob.status} />
+          <AuditProgress
+            status={confirmPending ? "running_audit" : activeJob.status}
+          />
         )}
         {message.kind === "result" && activeJob?.report && (
           <AuditResults

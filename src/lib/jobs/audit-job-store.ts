@@ -5,6 +5,7 @@ import { createClient, type Client } from "@libsql/client";
 import { getLogger } from "@/lib/observability/logger";
 import { getMastra } from "@/lib/mastra";
 import { getEnv } from "@/lib/env";
+import { resolveAuditJobStatus } from "@/lib/jobs/audit-job-status";
 import {
   AppMetadataSchema,
   AuditReportSchema,
@@ -45,6 +46,7 @@ interface JobIndexEntry {
   runId: string;
   inputUrl: string;
   createdAt: number;
+  confirmedAt: number | null;
 }
 
 export interface ChatSession {
@@ -296,6 +298,11 @@ async function ensureSchema(): Promise<void> {
     } catch {
       // Column already exists on upgraded databases.
     }
+    try {
+      await db.execute("ALTER TABLE audit_jobs ADD COLUMN confirmed_at INTEGER");
+    } catch {
+      // Column already exists on upgraded databases.
+    }
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at DESC)",
     );
@@ -367,7 +374,7 @@ async function getJobEntry(jobId: string): Promise<JobIndexEntry | null> {
   await ensureSchema();
   const db = getDb();
   const rs = await db.execute({
-    sql: "SELECT job_id, chat_id, run_id, input_url, created_at FROM audit_jobs WHERE job_id = ? LIMIT 1",
+    sql: "SELECT job_id, chat_id, run_id, input_url, created_at, confirmed_at FROM audit_jobs WHERE job_id = ? LIMIT 1",
     args: [jobId],
   });
   const row = rs.rows[0] as Record<string, unknown> | undefined;
@@ -378,6 +385,7 @@ async function getJobEntry(jobId: string): Promise<JobIndexEntry | null> {
     runId: rowToString(row, "run_id"),
     inputUrl: rowToString(row, "input_url"),
     createdAt: rowToNumber(row, "created_at"),
+    confirmedAt: rowToNullableNumber(row, "confirmed_at"),
   };
 }
 
@@ -385,7 +393,7 @@ async function getJobEntryByChatId(chatId: string): Promise<JobIndexEntry | null
   await ensureSchema();
   const db = getDb();
   const rs = await db.execute({
-    sql: "SELECT job_id, chat_id, run_id, input_url, created_at FROM audit_jobs WHERE chat_id = ? LIMIT 1",
+    sql: "SELECT job_id, chat_id, run_id, input_url, created_at, confirmed_at FROM audit_jobs WHERE chat_id = ? LIMIT 1",
     args: [chatId],
   });
   const row = rs.rows[0] as Record<string, unknown> | undefined;
@@ -396,6 +404,7 @@ async function getJobEntryByChatId(chatId: string): Promise<JobIndexEntry | null
     runId: rowToString(row, "run_id"),
     inputUrl: rowToString(row, "input_url"),
     createdAt: rowToNumber(row, "created_at"),
+    confirmedAt: rowToNullableNumber(row, "confirmed_at"),
   };
 }
 
@@ -574,7 +583,7 @@ export async function createAuditJob(input: { url: string; chatId: string }): Pr
   const createdAt = Date.now();
   await db.batch([
     {
-      sql: "INSERT INTO audit_jobs (job_id, chat_id, run_id, input_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      sql: "INSERT INTO audit_jobs (job_id, chat_id, run_id, input_url, created_at, updated_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
       args: [jobId, input.chatId, run.runId, input.url, createdAt, createdAt],
     },
     {
@@ -661,7 +670,7 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
     return {
       jobId,
       runId: idx.runId,
-      status: "queued",
+      status: resolveAuditJobStatus("queued", idx.confirmedAt),
       inputUrl: idx.inputUrl,
       parsed: null,
       metadata: null,
@@ -673,7 +682,11 @@ export async function getAuditJob(jobId: string): Promise<AuditJob> {
       updatedAt: Date.now(),
     };
   }
-  return snapshotToJob(idx.jobId, idx.runId, idx.inputUrl, snapshot, idx.createdAt);
+  const job = snapshotToJob(idx.jobId, idx.runId, idx.inputUrl, snapshot, idx.createdAt);
+  return {
+    ...job,
+    status: resolveAuditJobStatus(job.status, idx.confirmedAt),
+  };
 }
 
 /**
@@ -738,70 +751,66 @@ export async function confirmAuditJob(
   const logger = getLogger();
   const idx = await getJobEntry(jobId);
   if (!idx) throw new Error(`Unknown jobId: ${jobId}`);
-  const mastra = getMastra();
-  const workflow = mastra.getWorkflow("asoAuditWorkflow");
-  const run = await workflow.createRun({ runId: idx.runId });
-
-  const resumeStartedAt = performance.now();
-  logger.info(
-    {
-      jobId,
-      runId: idx.runId,
-      hop: "workflow.resume",
-      phase: "start",
-      confirmed,
-    },
-    `\u25b6 workflow.resume (confirmed=${confirmed})`,
-  );
-  const resumeWork = run
-    .resume({ step: "await-confirmation", resumeData: { confirmed } })
-    .then((res) => {
-      logger.info(
-        {
-          jobId,
-          runId: idx.runId,
-          hop: "workflow.resume",
-          phase: "end",
-          ok: true,
-          confirmed,
-          durationMs: Math.round(performance.now() - resumeStartedAt),
-          workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
-        },
-        "\u2713 workflow.resume settled",
-      );
-      return res;
-    })
-    .catch((err) => {
-      // Always log resume failures - even on confirmed=false the resume can
-      // throw because the step intentionally rejects rejected confirmations.
-      // We only treat it as a real error when the user actually confirmed.
-      const level = confirmed ? "error" : "info";
-      logger[level](
-        {
-          jobId,
-          runId: idx.runId,
-          hop: "workflow.resume",
-          phase: "end",
-          ok: false,
-          confirmed,
-          durationMs: Math.round(performance.now() - resumeStartedAt),
-          err: (err as Error).message,
-        },
-        confirmed
-          ? "\u2717 workflow.resume failed"
-          : "workflow.resume completed with rejection",
-      );
-    });
-
-  after(async () => {
-    // This keeps the serverless function alive while the audit actually runs.
-    // On Vercel the function can stay up to `maxDuration` after the response
-    // is sent; the confirm route is configured for the platform max so the
-    // LLM call has room to finish.
-    await resumeWork;
-  });
-
   await ensureSchema();
+
+  const scheduleWorkflowResume = () => {
+    const mastra = getMastra();
+    const workflow = mastra.getWorkflow("asoAuditWorkflow");
+    const resumeStartedAt = performance.now();
+    logger.info(
+      {
+        jobId,
+        runId: idx.runId,
+        hop: "workflow.resume",
+        phase: "start",
+        confirmed,
+      },
+      `\u25b6 workflow.resume (confirmed=${confirmed})`,
+    );
+    const resumeWork = workflow
+      .createRun({ runId: idx.runId })
+      .then((run) =>
+        run.resume({ step: "await-confirmation", resumeData: { confirmed } }),
+      )
+      .then((res) => {
+        logger.info(
+          {
+            jobId,
+            runId: idx.runId,
+            hop: "workflow.resume",
+            phase: "end",
+            ok: true,
+            confirmed,
+            durationMs: Math.round(performance.now() - resumeStartedAt),
+            workflowStatus: (res as { status?: string } | undefined)?.status ?? null,
+          },
+          "\u2713 workflow.resume settled",
+        );
+        return res;
+      })
+      .catch((err) => {
+        const level = confirmed ? "error" : "info";
+        logger[level](
+          {
+            jobId,
+            runId: idx.runId,
+            hop: "workflow.resume",
+            phase: "end",
+            ok: false,
+            confirmed,
+            durationMs: Math.round(performance.now() - resumeStartedAt),
+            err: (err as Error).message,
+          },
+          confirmed
+            ? "\u2717 workflow.resume failed"
+            : "workflow.resume completed with rejection",
+        );
+      });
+
+    after(async () => {
+      await resumeWork;
+    });
+  };
 
   if (!confirmed) {
     await getDb().batch([
@@ -818,39 +827,27 @@ export async function confirmAuditJob(
       { jobId, chatId: idx.chatId },
       "audit rejected before start; chat released",
     );
+    scheduleWorkflowResume();
     return null;
   }
 
+  const confirmedAt = Date.now();
   await getDb().batch([
     {
-      sql: "UPDATE audit_jobs SET updated_at = ? WHERE job_id = ?",
-      args: [Date.now(), jobId],
+      sql: "UPDATE audit_jobs SET confirmed_at = ?, updated_at = ? WHERE job_id = ?",
+      args: [confirmedAt, confirmedAt, jobId],
     },
     {
       sql: "UPDATE chat_sessions SET updated_at = ? WHERE chat_id = ?",
-      args: [Date.now(), idx.chatId],
+      args: [confirmedAt, idx.chatId],
     },
   ]);
 
-  // Wait briefly for Mastra to write the post-resume snapshot transition. In
-  // practice this resolves in <500ms; cap at 5s so we never block the response
-  // meaningfully.
+  scheduleWorkflowResume();
+
   const job = await waitForResumeToProgress(jobId);
-  if (job.status === "awaiting_confirmation") {
-    // Mastra hasn't flushed the transition yet but we KNOW resume was kicked
-    // off successfully (resumeWork is in flight inside `after()`). Synthesize
-    // running_audit so the client UI flips out of the confirm card and starts
-    // polling. The very next poll will see the authoritative snapshot.
-    logger.warn(
-      {
-        jobId,
-        runId: idx.runId,
-        hop: "workflow.resume",
-        phase: "synthesized",
-      },
-      "snapshot still awaiting_confirmation after resume; synthesizing running_audit for client response",
-    );
-    return { ...job, status: "running_audit", updatedAt: Date.now() };
-  }
-  return job;
+  return {
+    ...job,
+    status: resolveAuditJobStatus(job.status, confirmedAt),
+  };
 }
