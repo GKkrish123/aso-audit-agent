@@ -8,7 +8,7 @@
       "maxDuration": 300
     },
     "src/app/api/audit/[jobId]/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   }
 }
